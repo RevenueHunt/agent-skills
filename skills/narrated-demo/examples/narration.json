@@ -1,0 +1,16 @@
+{
+  "segments": [
+    {
+      "anchor": "overview",
+      "text": "A useful demo starts with a clear view of the workflow. This example uses only synthetic data."
+    },
+    {
+      "anchor": "change",
+      "text": "Next, select the update. Keep the screen visible long enough to explain what changed."
+    },
+    {
+      "anchor": "completed",
+      "text": "The result is ready. The same recording can now become a narrated video with readable subtitles."
+    }
+  ]
+}

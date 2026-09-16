@@ -1,0 +1,14 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+outputs/
+build-cache/
+*.mp4
+*.webm
+*.mkv
+*.wav
+*.srt
+*-qa/
