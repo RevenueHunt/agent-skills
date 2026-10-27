@@ -9,8 +9,10 @@ no required agent SDK, plugin, or MCP server.
 plan into a shareable video:
 
 - Local Kokoro-82M voiceover, cached between builds.
-- Narration anchored to observed screen transitions.
+- Narration anchored to observed screen transitions, with measured timing for each authored cue.
+- Natural subtitle boundaries, at most two lines, and duration/reading-speed validation.
 - H.264/AAC MP4 with burned-in subtitles, plus SRT and optional soft-subtitle MKV.
+- Local video delivery and playback in VLC, not Sideshow video uploads.
 - Natural-speed narration by default, media validation, and visual QA frames.
 
 Use it for feature walkthroughs, bug explanations, and before/after demos. It is a workflow for
@@ -28,8 +30,18 @@ discovery varies by agent; the workflow does not depend on native discovery or a
 git clone https://github.com/RevenueHunt/agent-skills.git
 ```
 
-Either copy the **entire** `skills/narrated-demo` directory into your agent's documented skill
-location, or keep the checkout anywhere and give your agent this prompt:
+To maintain one source of truth, symlink the **entire** `skills/narrated-demo` directory from your
+checkout into your agent's documented skill location. For example, with Pi:
+
+```bash
+mkdir -p ~/.pi/agent/skills
+ln -s /absolute/path/to/agent-skills/skills/narrated-demo ~/.pi/agent/skills/narrated-demo
+```
+
+If an installation already exists, compare and preserve any local changes before replacing it;
+do not overwrite it blindly. Edit the checkout and the symlinked installation updates immediately.
+Copying the directory is also possible, but creates a separate snapshot you must synchronize.
+Alternatively, keep the checkout anywhere and give your agent this prompt:
 
 > Read `/absolute/path/to/agent-skills/skills/narrated-demo/SKILL.md` and follow it to make a
 > narrated walkthrough of [local URL and journey]. Save the result to [output directory].

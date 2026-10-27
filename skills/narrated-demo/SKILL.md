@@ -9,7 +9,9 @@ compatibility: Requires Python 3.10–3.13, Kokoro, ffmpeg/ffprobe with libx264 
 
 Produce an H.264/AAC MP4 with burned-in subtitles, an SRT, and optionally an MKV with selectable
 subtitles. Use the agent's available file, shell, browser, and image-inspection capabilities;
-no tool names, agent runtime, or fixed installation directory are required.
+no tool names, agent runtime, or fixed installation directory are required. Deliver the video as a
+local file and open it in VLC. Do not upload or embed it in Sideshow; that is for text and static
+representations, not video delivery in this workflow.
 
 Resolve all relative paths below against **the directory containing this SKILL.md**, not the
 user's project. Keep recordings and build caches in a separate output directory.
@@ -31,21 +33,29 @@ when the user's environment requires approval.
 
 ## 2. Storyboard and narration
 
-Create 3–7 short phases, each with a settled visible state and a marker name. Aim for roughly
-125–150 spoken words per minute. Save a narration plan:
+Read [subtitle authoring and timing](references/subtitles.md) before writing narration.
+Create 3–7 visual phases, each with a settled state and marker. Each `segments` entry is one short
+spoken subtitle cue, not a whole phase or paragraph. Anchor only the first cue of each phase;
+omit `anchor` on continuations. Author natural sentence/clause boundaries and explicit `\n` line
+breaks: at most two lines of 42 characters each (English profile). Aim for 125–150 spoken words/minute.
 
 ```json
 {
   "segments": [
-    {"anchor": "overview", "text": "Here is the starting workflow."},
-    {"anchor": "change", "text": "Next, we make the change."},
-    {"anchor": "completed", "text": "Finally, the result is ready."}
+    {"anchor": "overview", "text": "The builder and compiler read\nthe same HTML differently."},
+    {"text": "That means two interpretations\nto keep in agreement."},
+    {"anchor": "change", "text": "Now both use the compiler's tree."},
+    {"text": "Each quiz rule has one owner."},
+    {"anchor": "completed", "text": "The old bridge can then be deleted."}
   ]
 }
 ```
 
-Allow enough screen time for each sentence plus a small gap. Marker names are preferred over
-guessed timestamps. See the [synthetic example](examples/README.md) for a safe practice surface.
+Each cue is synthesized once; its measured audio duration determines subtitle timing. Check cadence
+when a sentence spans cues; rewrite awkward fragments rather than adding arbitrary gaps. Legacy
+paragraph plans must be re-authored, not sliced by word count or timed by text length. Allow enough
+screen time for every cue in a phase plus a small gap. Prefer markers over guessed timestamps.
+See the [synthetic example](examples/README.md) for a safe practice surface.
 
 ## 3. Record and capture markers
 
@@ -76,10 +86,11 @@ python /absolute/path/to/narrated-demo/scripts/build_demo.py \
   --work-dir /absolute/path/to/output/build-cache
 ```
 
-Defaults: Kokoro `af_heart`, 0.5-second narration gaps, and automatic duration. The helper reuses
-cached speech and pads the **final** video frame instead of speeding narration. It does not freeze
-intermediate screens: markers are earliest start times, and earlier speech can delay later cues.
-If narration and screens diverge, shorten the text or re-record with longer holds.
+Defaults: Kokoro `af_heart`, 0.5-second gaps between visual phases (no added gaps between continuation
+cues), and automatic duration. The helper reuses cached speech and pads the **final** video frame
+instead of speeding narration. It rejects cues outside 0.83–7 seconds or above 20 characters/second.
+It does not freeze intermediate screens: markers are earliest start times, and earlier speech can
+delay later cues. If narration and screens diverge, shorten the text or re-record with longer holds.
 
 Use `--duration <seconds>` only for an explicit duration requirement. Speech cannot exceed 1.15×
 by default; shorten narration or increase duration rather than forcing unnatural speed.
@@ -89,11 +100,16 @@ by default; shorten narration or increase duration rather than forcing unnatural
 The build must finish with `Media validation passed.` Then:
 
 1. Inspect `demo-qa/contact-sheet.jpg` and any questionable individual frames.
-2. Confirm each narration phase matches the screen, subtitles avoid focal controls, and the final
-   frame is useful. Play the MP4 with audio; if playback is unavailable, disclose that limitation.
-3. Report the MP4/SRT/optional MKV paths, exact duration, narration speed, what it demonstrates,
-   browser diagnostics, and any unverified checks.
-4. Stop only processes started for this task. Remove only task-created disposable fixtures and
+2. Confirm each narration phase matches the screen and the final frame is useful. Check natural
+   subtitle breaks, rendered width and speech sync, especially numbers and sentence continuations.
+   Reserve a stable subtitle area in fixtures; do not cover focal controls or shrink text to fit prose.
+3. After validation, open the final MP4 in VLC: on macOS, use `open -a VLC "/absolute/path/demo.mp4"`;
+   on Linux, use `vlc "/absolute/path/demo.mp4"`. For revisions, open the newly generated file, not
+   the previous version. Play it with audio; if VLC or playback is unavailable, report the limitation
+   and local path rather than substituting Sideshow.
+4. Report the MP4/SRT/optional MKV paths, VLC opening result, exact duration, narration speed, what
+   it demonstrates, browser diagnostics, and any unverified checks.
+5. Stop only processes started for this task. Remove only task-created disposable fixtures and
    unwanted takes; preserve requested deliverables and reusable caches.
 
 Never expose credentials, customer data, or private tabs in a demo. Use disposable/local state.

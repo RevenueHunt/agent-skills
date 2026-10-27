@@ -12,7 +12,8 @@ Kokoro's pronunciation fallback, and libsndfile for WAV output.
 macOS with Homebrew:
 
 ```bash
-brew install ffmpeg espeak-ng libsndfile
+brew install ffmpeg-full espeak-ng libsndfile
+export PATH="$(brew --prefix ffmpeg-full)/bin:$PATH"
 ```
 
 Ubuntu/Debian:
@@ -30,8 +31,9 @@ ffmpeg -hide_banner -filters 2>/dev/null | grep subtitles
 ffprobe -version
 ```
 
-Both encoders and the subtitle filter must be present. Have a font available for subtitles;
-the builder requests Arial and libass uses a system fallback when it is not installed.
+Both encoders and the subtitle filter must be present. Homebrew's regular `ffmpeg` may lack
+libass; `ffmpeg-full` is keg-only, so select its `bin` directory on PATH as above. Have a font available
+for subtitles; the builder requests Arial and libass uses a system fallback when it is not installed.
 
 ## Python environment
 

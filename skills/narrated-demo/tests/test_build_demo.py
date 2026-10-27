@@ -88,9 +88,50 @@ class NarratedDemoBuildTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "empty text"):
                 build_demo.load_plan(path)
 
-    def test_subtitles_are_bounded_to_three_lines(self) -> None:
-        text = " ".join(["word"] * 60)
-        self.assertLessEqual(len(build_demo.subtitle_text(text).splitlines()), 3)
+    def test_subtitles_preserve_authored_phrase_and_line_boundaries(self) -> None:
+        text = "The target is one shared parsing model,\nwith source positions,"
+        self.assertEqual(build_demo.subtitle_text(text), text)
+        self.assertEqual(build_demo.subtitle_text("It took 13 milliseconds."), "It took 13 milliseconds.")
+
+    def test_paragraph_plans_fail_with_repair_instructions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plan = Path(directory) / "plan.json"
+            plan.write_text(json.dumps({"segments": [{"text": "A whole paragraph. " * 20}]}))
+            with self.assertRaisesRegex(ValueError, "Segment 1:.*42 characters"):
+                build_demo.load_plan(plan)
+
+    def test_three_lines_and_blank_lines_are_rejected(self) -> None:
+        for text in ("First\nSecond\nThird", "First\n\nSecond"):
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, "one or two non-empty"):
+                build_demo.subtitle_text(text)
+
+    def test_continuations_use_measured_duration_without_extra_gaps(self) -> None:
+        segments = [
+            {"anchor": 1.0, "text": "The target is one shared parsing model,\nwith source positions,"},
+            {"anchor": None, "text": "and one owner for each quiz rule."},
+            {"anchor": 7.0, "text": "Now inspect the result."},
+        ]
+        starts, ends = build_demo.schedule(segments, [4.0, 2.0, 2.0], gap=0.5, initial=0.8)
+        self.assertEqual(starts, [1.0, 5.0, 7.5])
+        self.assertEqual(ends, [5.0, 7.0, 9.5])
+        self.assertEqual(
+            build_demo.build_subtitles(segments, starts, ends),
+            "1\n00:00:01,000 --> 00:00:05,000\n"
+            "The target is one shared parsing model,\nwith source positions,\n\n"
+            "2\n00:00:05,000 --> 00:00:07,000\nand one owner for each quiz rule.\n\n"
+            "3\n00:00:07,500 --> 00:00:09,500\nNow inspect the result.\n",
+        )
+
+    def test_unreadable_speed_is_rejected_even_with_valid_line_lengths(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Subtitle 1 needs.*maximum 20"):
+            build_demo.build_subtitles(
+                [{"text": "The builder and compiler read\nthe same HTML differently."}], [0.0], [2.0]
+            )
+
+    def test_short_and_long_cues_require_reauthoring(self) -> None:
+        for duration in (0.5, 8.0):
+            with self.subTest(duration=duration), self.assertRaisesRegex(ValueError, "Merge.*split"):
+                build_demo.build_subtitles([{"text": "Here is the result."}], [0.0], [duration])
 
 
 if __name__ == "__main__":

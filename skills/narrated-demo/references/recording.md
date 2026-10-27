@@ -31,8 +31,9 @@ Example timeline shape (replace these times with observed values):
 ```
 
 Named markers use **raw-video time**, and are adjusted if `--duration` speeds up the video.
-Numeric anchors instead refer to **final-output time**. An omitted anchor follows the preceding
-narration with the selected pacing gap. Named markers are less error-prone for browser journeys.
+Numeric anchors instead refer to **final-output time**. An omitted anchor continues the preceding
+narration with no added gap. Anchor only the first subtitle cue in each visual phase; the selected
+pacing gap applies between phases. Named markers are less error-prone for browser journeys.
 
 The builder uses only `markers` from the timeline; extra diagnostic fields are optional and are
 not interpreted as proof that browser checks passed. Unknown marker names fail the build.

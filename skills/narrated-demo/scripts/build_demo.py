@@ -13,7 +13,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import textwrap
 from pathlib import Path
 
 PACING_GAPS = {"tight": 0.5, "normal": 0.9, "relaxed": 1.2}
@@ -93,26 +92,38 @@ def timestamp(seconds: float) -> str:
 
 
 def subtitle_text(text: str) -> str:
-    wrapped = textwrap.wrap(text, width=72, break_long_words=False, break_on_hyphens=False)
-    if len(wrapped) <= 3:
-        return "\n".join(wrapped)
-
-    words = text.split()
-    target_lines = 3
-    target_length = math.ceil(len(text) / target_lines)
-    lines: list[str] = []
-    current: list[str] = []
-    for word in words:
-        candidate = " ".join([*current, word])
-        remaining_words = len(words) - sum(len(line.split()) for line in lines) - len(current)
-        if current and len(candidate) > target_length and len(lines) < target_lines - 1 and remaining_words > 1:
-            lines.append(" ".join(current))
-            current = [word]
-        else:
-            current.append(word)
-    if current:
-        lines.append(" ".join(current))
+    """Preserve authored linguistic breaks; never slice prose by word count."""
+    lines = [" ".join(line.split()) for line in text.strip().splitlines()]
+    if not 1 <= len(lines) <= 2 or not all(lines):
+        raise ValueError("Each subtitle must have one or two non-empty lines; split it into natural cues.")
+    if any(len(line) > 42 for line in lines):
+        raise ValueError(
+            "Subtitle lines must be at most 42 characters. Author a natural line break "
+            "or split the sentence into separate cue segments; see references/subtitles.md."
+        )
     return "\n".join(lines)
+
+
+def build_subtitles(
+    segments: list[dict[str, object]], starts: list[float], ends: list[float]
+) -> str:
+    cues: list[str] = []
+    for index, (segment, start, end) in enumerate(zip(segments, starts, ends, strict=True), 1):
+        text = subtitle_text(str(segment["text"]))
+        duration = end - start
+        if not 5 / 6 <= duration <= 7:
+            raise ValueError(
+                f"Subtitle {index} lasts {duration:.2f}s; expected 0.83–7s. "
+                "Merge a short cue or split a long cue at a natural phrase boundary."
+            )
+        cps = len(" ".join(text.split())) / duration
+        if cps > 20:
+            raise ValueError(
+                f"Subtitle {index} needs {cps:.1f} characters/second (maximum 20). "
+                "Slow the narration or rewrite the spoken text and subtitle together."
+            )
+        cues.append(f"{index}\n{timestamp(start)} --> {timestamp(end)}\n{text}")
+    return "\n\n".join(cues) + "\n"
 
 
 def load_plan(path: Path) -> list[dict[str, object]]:
@@ -128,6 +139,10 @@ def load_plan(path: Path) -> list[dict[str, object]]:
         text = segment["text"].strip()
         if not text:
             raise ValueError(f"Segment {index} has empty text")
+        try:
+            text = subtitle_text(text)
+        except ValueError as error:
+            raise ValueError(f"Segment {index}: {error}") from error
         anchor = segment.get("anchor")
         valid_anchor = (
             anchor is None
@@ -184,13 +199,16 @@ def schedule(
     starts: list[float] = []
     ends: list[float] = []
     cursor = initial
-    for segment, duration in zip(segments, durations, strict=True):
+    for index, (segment, duration) in enumerate(zip(segments, durations, strict=True)):
         anchor = segment["anchor"]
+        # A marker starts a visual phase. Unanchored cues continue the same speech.
+        if index and anchor is not None:
+            cursor += gap
         start = max(cursor, float(anchor)) if anchor is not None else cursor
         end = start + duration
         starts.append(start)
         ends.append(end)
-        cursor = end + gap
+        cursor = end
     return starts, ends
 
 
@@ -275,10 +293,12 @@ def prepare_raw_narration(
 
     cache_dir = work / "tts-cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    paths = [tts_cache_path(cache_dir, str(segment["text"]), voice, lang) for segment in segments]
+    # Visual line breaks must not cause Kokoro to synthesize separate utterances.
+    texts = [" ".join(str(segment["text"]).split()) for segment in segments]
+    paths = [tts_cache_path(cache_dir, text, voice, lang) for text in texts]
     missing = [
-        (str(segment["text"]), path)
-        for segment, path in zip(segments, paths, strict=True)
+        (text, path)
+        for text, path in zip(texts, paths, strict=True)
         if not audio_file_is_valid(path)
     ]
     reused = len(paths) - len(missing)
@@ -461,15 +481,7 @@ def main() -> int:
             )
 
         srt = args.output.with_suffix(".srt")
-        srt.write_text(
-            "\n\n".join(
-                f"{index}\n{timestamp(start)} --> {timestamp(end)}\n{subtitle_text(str(segment['text']))}"
-                for index, (segment, start, end) in enumerate(
-                    zip(resolved_segments, starts, ends, strict=True), 1
-                )
-            )
-            + "\n"
-        )
+        srt.write_text(build_subtitles(resolved_segments, starts, ends))
 
         mix = work / "narration.wav"
         inputs: list[str] = []
@@ -619,7 +631,10 @@ def main() -> int:
         qa.mkdir()
         sample_times = [
             min(start + args.qa_offset, max(start, end - 0.1), target_duration - 0.1)
-            for start, end in zip(starts, ends, strict=True)
+            for index, (segment, start, end) in enumerate(
+                zip(resolved_segments, starts, ends, strict=True)
+            )
+            if index == 0 or segment["anchor"] is not None
         ][:8]
         for index, sample_time in enumerate(sample_times, 1):
             run(
