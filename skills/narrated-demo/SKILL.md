@@ -2,7 +2,7 @@
 name: narrated-demo
 description: Create a narrated screen-capture demo of a web UI with local voiceover and subtitles. Use when the user asks for a video, screencast, narrated walkthrough, feature demo, or bug explanation. Works with any browser recorder and coding agent with file and shell access.
 license: MIT
-compatibility: Requires Python 3.10–3.13, Kokoro, ffmpeg/ffprobe with libx264 and libass, and a browser recorder or existing recording. First-time TTS setup needs network access. Setup documented for macOS and Linux.
+compatibility: Requires Python 3.10–3.13, Audio8 Realistic 0.6B (torch + transformers<5), ffmpeg/ffprobe with libx264 and libass, and a browser recorder or existing recording. First-time TTS setup needs network access. Setup documented for macOS and Linux.
 ---
 
 # Narrated screen demos
@@ -22,13 +22,14 @@ Read [setup](references/setup.md). Use the configured Python environment and run
 
 ```bash
 python -m unittest discover -s /absolute/path/to/narrated-demo/tests -v
-python /absolute/path/to/narrated-demo/scripts/kokoro_tts.py \
+python /absolute/path/to/narrated-demo/scripts/audio8_tts.py \
   "Narration check." -o /absolute/path/to/output/narration-check.wav
 ```
 
 Confirm ffmpeg/ffprobe, subtitle support, and a browser recording capability before proceeding.
-The bundled builder uses Kokoro; if it is unavailable, report the blocker rather than silently
-substituting a different voice engine. Ask before installing dependencies or downloading models
+The bundled builder always uses Audio8 Realistic 0.6B with the bundled reference voice
+(`assets/voice-reference.wav`), so every video has the same realistic voice. If it is unavailable,
+report the blocker rather than silently substituting a different voice engine. Ask before installing dependencies or downloading models
 when the user's environment requires approval.
 
 ## 2. Storyboard and narration
@@ -86,7 +87,7 @@ python /absolute/path/to/narrated-demo/scripts/build_demo.py \
   --work-dir /absolute/path/to/output/build-cache
 ```
 
-Defaults: Kokoro `af_heart`, 0.5-second gaps between visual phases (no added gaps between continuation
+Defaults: Audio8 Realistic 0.6B (bundled voice), 0.5-second gaps between visual phases (no added gaps between continuation
 cues), and automatic duration. The helper reuses cached speech and pads the **final** video frame
 instead of speeding narration. It rejects cues outside 0.83–7 seconds or above 20 characters/second.
 It does not freeze intermediate screens: markers are earliest start times, and earlier speech can

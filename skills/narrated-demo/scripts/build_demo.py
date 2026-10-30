@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 PACING_GAPS = {"tight": 0.5, "normal": 0.9, "relaxed": 1.2}
-TTS_CACHE_VERSION = 1
+TTS_CACHE_VERSION = 2
 
 
 class CommandError(RuntimeError):
@@ -261,14 +261,12 @@ def filter_path(path: Path) -> str:
     return str(path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
 
 
-def tts_cache_path(cache_dir: Path, text: str, voice: str, lang: str) -> Path:
+def tts_cache_path(cache_dir: Path, text: str) -> Path:
     digest = hashlib.sha256(
         json.dumps(
             {
                 "version": TTS_CACHE_VERSION,
                 "text": text,
-                "voice": voice,
-                "lang": lang,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -287,15 +285,15 @@ def audio_file_is_valid(path: Path) -> bool:
 
 
 def prepare_raw_narration(
-    segments: list[dict[str, object]], work: Path, voice: str, lang: str
+    segments: list[dict[str, object]], work: Path
 ) -> tuple[list[Path], list[float]]:
-    from kokoro_tts import synthesize_many
+    from audio8_tts import synthesize_many
 
     cache_dir = work / "tts-cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    # Visual line breaks must not cause Kokoro to synthesize separate utterances.
+    # Visual line breaks must not cause the TTS model to synthesize separate utterances.
     texts = [" ".join(str(segment["text"]).split()) for segment in segments]
-    paths = [tts_cache_path(cache_dir, text, voice, lang) for text in texts]
+    paths = [tts_cache_path(cache_dir, text) for text in texts]
     missing = [
         (text, path)
         for text, path in zip(texts, paths, strict=True)
@@ -304,7 +302,7 @@ def prepare_raw_narration(
     reused = len(paths) - len(missing)
     print(f"Narration cache: {reused} reused, {len(missing)} to generate")
     if missing:
-        synthesize_many(missing, voice=voice, lang=lang)
+        synthesize_many(missing)
     durations = [probe_duration(path) for path in paths]
     return paths, durations
 
@@ -414,8 +412,6 @@ def main() -> int:
         help="Target seconds or 'auto' (default); auto pads the final frame instead of speeding speech",
     )
     parser.add_argument("--pacing", choices=PACING_GAPS, default="tight")
-    parser.add_argument("--voice", default="af_heart")
-    parser.add_argument("--lang", default="a", help="Kokoro language code")
     parser.add_argument("--initial-silence", type=float, default=0.8)
     parser.add_argument("--max-narration-speed", type=float, default=1.15)
     parser.add_argument("--qa-offset", type=float, default=0.8)
@@ -448,7 +444,7 @@ def main() -> int:
 
     try:
         raw_duration = probe_duration(args.raw)
-        raw_audio, raw_durations = prepare_raw_narration(segments, work, args.voice, args.lang)
+        raw_audio, raw_durations = prepare_raw_narration(segments, work)
         gap = PACING_GAPS[args.pacing]
 
         if requested_duration is None:

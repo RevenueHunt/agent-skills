@@ -12,3 +12,4 @@ build-cache/
 *.wav
 *.srt
 *-qa/
+!skills/narrated-demo/assets/voice-reference.wav
