@@ -1,118 +1,87 @@
 ---
 name: narrated-demo
-description: Create a narrated screen-capture demo of a web UI with local voiceover and subtitles. Use when the user asks for a video, screencast, narrated walkthrough, feature demo, or bug explanation. Works with any browser recorder and coding agent with file and shell access.
+description: Turn a document, README or report into a narrated slide deck (slides, voice, subtitles) that plays as a preview and can export an MP4; or narrate a screen recording of a web UI. Use when the user asks for an explainer, a narrated walkthrough, a video summary, a demo video or a screencast.
 license: MIT
-compatibility: Requires Python 3.10–3.13, Audio8 Realistic 0.6B (torch + transformers<5), ffmpeg/ffprobe with libx264 and libass, and a browser recorder or existing recording. First-time TTS setup needs network access. Setup documented for macOS and Linux.
+compatibility: Python 3.10–3.12 with kokoro, markdown and soundfile; ffmpeg; Google Chrome or Chromium. Setup in references/setup.md.
 ---
 
-# Narrated screen demos
+# Narrated decks
 
-Produce an H.264/AAC MP4 with burned-in subtitles, an SRT, and optionally an MKV with selectable
-subtitles. Use the agent's available file, shell, browser, and image-inspection capabilities;
-no tool names, agent runtime, or fixed installation directory are required. Deliver the video as a
-local file and open it in VLC. Do not upload or embed it in Sideshow; that is for text and static
-representations, not video delivery in this workflow.
+Write one Markdown file, run one command, get slides with a voice and subtitles. The theme, voice, timing and
+subtitle style are fixed: do not restyle or tune them. Spend your effort on what the deck says.
 
-Resolve all relative paths below against **the directory containing this SKILL.md**, not the
-user's project. Keep recordings and build caches in a separate output directory.
+## 1. Write the deck
 
-## 1. Preflight
+Read the source document, pick the 4–8 points a newcomer needs, and write `<name>.md` next to where the user wants
+the result. Every `#` or `##` heading starts a slide; the `> ` lines under it are spoken, one subtitle each.
 
-Read [setup](references/setup.md). Use the configured Python environment and run:
+```markdown
+---
+voice: af_heart
+speed: 1.1
+---
+
+# Nightly backups
+
+What runs every night, and how to get a file back.
+
+> Every night, the server copies your files somewhere safe.
+> Here is what it keeps, and how to restore one.
+
+## How it works
+
+1. At 2 AM a snapshot of `/data` is taken
+2. Only changed blocks are uploaded
+3. A check reads every snapshot back
+
+> At two in the morning, it takes a snapshot of the data folder.
+> Only the parts that changed are uploaded.
+> Then it reads the snapshot back, to prove it is complete.
+
+## What it keeps
+
+- **30 days** of nightly snapshots
+- **12 months** of monthly ones
+
+> You can go back to any night in the last thirty days.
+> After that, one snapshot per month is kept for a year.
+```
+
+Rules that keep it watchable:
+
+- **Slides carry key words; narration carries sentences.** At most 5 bullets or a 4-row table per slide. A list
+  whose every item starts with a bold number (`- **30 days** of snapshots`) becomes stat tiles; use them for 2–4
+  key figures, never for bold labels.
+- **One idea per spoken line**, at most 90 characters; aim for 2–4 lines per slide and 1–2 minutes in all.
+- **Write narration the way it is said.** Spell out symbols and units the voice would misread ("150 MB" →
+  "a hundred and fifty megabytes", "v2" → "version two"); plain numbers are fine.
+- Images: `![](diagram.png)` with a path relative to the deck file. Code blocks and tables render as they are.
+- Front matter is optional; `af_heart` at `1.1` is the default English voice.
+
+## 2. Build and preview
 
 ```bash
-python -m unittest discover -s /absolute/path/to/narrated-demo/tests -v
-python /absolute/path/to/narrated-demo/scripts/audio8_tts.py \
-  "Narration check." -o /absolute/path/to/output/narration-check.wav
+python /absolute/path/to/narrated-demo/scripts/deck.py /absolute/path/to/<name>.md
 ```
 
-Confirm ffmpeg/ffprobe, subtitle support, and a browser recording capability before proceeding.
-The bundled builder always uses Audio8 Realistic 0.6B with the bundled reference voice
-(`assets/voice-reference.wav`), so every video has the same realistic voice. If it is unavailable,
-report the blocker rather than silently substituting a different voice engine. Ask before installing dependencies or downloading models
-when the user's environment requires approval.
+It writes `<name>.deck/` beside the source: `deck.json` (the player manifest), `narration.m4a`, one frame per
+spoken line, `contact.jpg` (the first frame of each slide) and `<name>.srt`. Lines and frames are cached, so a re-run
+after an edit re-voices and redraws only what changed; it takes seconds. A problem (a line too long, a slide without
+narration) stops it with a message naming the slide.
 
-## 2. Storyboard and narration
+Check `contact.jpg` once: text fits, nothing is cut off, every slide says something. Fix the Markdown and re-run;
+never edit the generated files. `<name>.deck/` is build output: do not commit or format it unless the user asks.
 
-Read [subtitle authoring and timing](references/subtitles.md) before writing narration.
-Create 3–7 visual phases, each with a settled state and marker. Each `segments` entry is one short
-spoken subtitle cue, not a whole phase or paragraph. Anchor only the first cue of each phase;
-omit `anchor` on continuations. Author natural sentence/clause boundaries and explicit `\n` line
-breaks: at most two lines of 42 characters each (English profile). Aim for 125–150 spoken words/minute.
+## 3. Deliver
 
-```json
-{
-  "segments": [
-    {"anchor": "overview", "text": "The builder and compiler read\nthe same HTML differently."},
-    {"text": "That means two interpretations\nto keep in agreement."},
-    {"anchor": "change", "text": "Now both use the compiler's tree."},
-    {"text": "Each quiz rule has one owner."},
-    {"anchor": "completed", "text": "The old bridge can then be deleted."}
-  ]
-}
-```
+- **In Ultimate:** link the deck's `deck.json` by its absolute path, `[My deck](/abs/path/<name>.deck/deck.json)`.
+  The transcript shows it as a slide player with audio, subtitles and slide skipping.
+- **Anywhere else, or when the user asks for a video:** add `--video` to write `<name>.deck/<name>.mp4`, and report
+  its path.
 
-Each cue is synthesized once; its measured audio duration determines subtitle timing. Check cadence
-when a sentence spans cues; rewrite awkward fragments rather than adding arbitrary gaps. Legacy
-paragraph plans must be re-authored, not sliced by word count or timed by text length. Allow enough
-screen time for every cue in a phase plus a small gap. Prefer markers over guessed timestamps.
-See the [synthetic example](examples/README.md) for a safe practice surface.
+Report the deck path, its duration (printed by the build), and anything you left out of the source document.
 
-## 3. Record and capture markers
+## Screen recordings
 
-Read [recording and timeline requirements](references/recording.md). Use the available browser
-recorder, or an existing recording from the user; consult that tool's own API rather than assuming
-particular command names. Default to a fresh isolated session, 1440×900 viewport, and one take.
-
-Verify the starting frame, use stable selectors and state assertions, record transitions, then
-finalize the recording even if an interaction fails. Save observed marker times in `timeline.json`:
-
-```json
-{"markers": {"overview": 0.8, "change": 8.4, "completed": 17.2}}
-```
-
-Those numbers illustrate the format, not timings to reuse. Times are seconds from the raw video's
-start. Verify the finalized file can be decoded. Use explicit browser diagnostics if available;
-otherwise report page errors as **not checked**, never zero.
-
-## 4. Build
-
-```bash
-python /absolute/path/to/narrated-demo/scripts/build_demo.py \
-  --raw /absolute/path/to/output/raw.webm \
-  --plan /absolute/path/to/output/narration.json \
-  --timeline /absolute/path/to/output/timeline.json \
-  --output /absolute/path/to/output/demo.mp4 \
-  --pacing tight --also-mkv \
-  --work-dir /absolute/path/to/output/build-cache
-```
-
-Defaults: Audio8 Realistic 0.6B (bundled voice), 0.5-second gaps between visual phases (no added gaps between continuation
-cues), and automatic duration. The helper reuses cached speech and pads the **final** video frame
-instead of speeding narration. It rejects cues outside 0.83–7 seconds or above 20 characters/second.
-It does not freeze intermediate screens: markers are earliest start times, and earlier speech can
-delay later cues. If narration and screens diverge, shorten the text or re-record with longer holds.
-
-Use `--duration <seconds>` only for an explicit duration requirement. Speech cannot exceed 1.15×
-by default; shorten narration or increase duration rather than forcing unnatural speed.
-
-## 5. QA and delivery
-
-The build must finish with `Media validation passed.` Then:
-
-1. Inspect `demo-qa/contact-sheet.jpg` and any questionable individual frames.
-2. Confirm each narration phase matches the screen and the final frame is useful. Check natural
-   subtitle breaks, rendered width and speech sync, especially numbers and sentence continuations.
-   Reserve a stable subtitle area in fixtures; do not cover focal controls or shrink text to fit prose.
-3. After validation, open the final MP4 in VLC: on macOS, use `open -a VLC "/absolute/path/demo.mp4"`;
-   on Linux, use `vlc "/absolute/path/demo.mp4"`. For revisions, open the newly generated file, not
-   the previous version. Play it with audio; if VLC or playback is unavailable, report the limitation
-   and local path rather than substituting Sideshow.
-4. Report the MP4/SRT/optional MKV paths, VLC opening result, exact duration, narration speed, what
-   it demonstrates, browser diagnostics, and any unverified checks.
-5. Stop only processes started for this task. Remove only task-created disposable fixtures and
-   unwanted takes; preserve requested deliverables and reusable caches.
-
-Never expose credentials, customer data, or private tabs in a demo. Use disposable/local state.
-Recording is not permission to publish, purchase, or mutate production. Keep those actions subject
-to explicit authorization. A synthetic fixture is illustrative, not proof of real-app behavior.
+To narrate a recording of a real web UI in motion (a bug, a feature walkthrough), follow
+[screen-demo](references/screen-demo.md) instead.

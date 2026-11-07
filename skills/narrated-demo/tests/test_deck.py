@@ -1,0 +1,41 @@
+from __future__ import annotations
+
+import importlib.util
+import unittest
+from pathlib import Path
+
+MODULE_PATH = Path(__file__).resolve().parent.parent / "scripts" / "deck.py"
+SPEC = importlib.util.spec_from_file_location("narrated_deck", MODULE_PATH)
+assert SPEC and SPEC.loader
+deck = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(deck)
+
+
+class DeckTests(unittest.TestCase):
+    def test_parses_scenes_lines_and_front_matter(self) -> None:
+        meta, scenes = deck.parse(
+            "---\nspeed: 1.2\n---\n\n# Title\n\nIntro.\n\n> First line.\n\n## Points\n\n- a\n- b\n\n> Second.\n> Third.\n"
+        )
+        self.assertEqual(meta, {"voice": "af_heart", "speed": 1.2})
+        self.assertEqual([s["title"] for s in scenes], ["Title", "Points"])
+        self.assertEqual(scenes[1]["lines"], ["Second.", "Third."])
+        self.assertEqual(scenes[1]["body"], "- a\n- b")
+
+    def test_names_every_slide_that_needs_a_fix(self) -> None:
+        with self.assertRaises(deck.DeckError) as caught:
+            deck.parse("# Silent\n\nNo narration.\n\n## Wordy\n\n> " + "word " * 25 + "\n")
+        message = str(caught.exception)
+        self.assertIn("scene 1 (Silent): no narration", message)
+        self.assertIn("scene 2 (Wordy): line is", message)
+
+    def test_bold_led_lists_become_stat_tiles(self) -> None:
+        tiles = deck.body_html("- **30 days** nightly\n- **12 months** monthly")
+        self.assertIn('<div class="stats n2">', tiles)
+        self.assertIn("<b>30 days</b><span>nightly</span>", tiles)
+        self.assertIn("<ul>", deck.body_html("- plain\n- **30** later"))
+        # Bold labels stay a list (trial run: they became oversized tiles).
+        self.assertIn("<ul>", deck.body_html("- **Setup** — once\n- **Run** — daily"))
+
+
+if __name__ == "__main__":
+    unittest.main()
