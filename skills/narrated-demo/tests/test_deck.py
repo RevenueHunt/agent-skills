@@ -36,6 +36,13 @@ class DeckTests(unittest.TestCase):
         # Bold labels stay a list (trial run: they became oversized tiles).
         self.assertIn("<ul>", deck.body_html("- **Setup** — once\n- **Run** — daily"))
 
+    def test_slides_carry_no_spoken_text(self) -> None:
+        # Captions are drawn by the player and the MP4's subtitle track, so one frame serves the whole scene.
+        _, scenes = deck.parse("## Points\n\n- a\n\n> Spoken first.\n> Spoken second.\n")
+        page = deck.frame_html(scenes[0], Path("/tmp"), "")
+        self.assertIn("<h2>Points</h2>", page)
+        self.assertNotIn("Spoken", page)
+
 
 if __name__ == "__main__":
     unittest.main()

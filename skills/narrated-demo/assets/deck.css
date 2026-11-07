@@ -1,8 +1,8 @@
-/* The one deck theme: 1920x1080, content above a fixed subtitle band. Decks do not restyle it. */
+/* The one deck theme: 1920x1080, content above an empty bottom band where the player draws captions. Decks do not restyle it. */
 * { box-sizing: border-box; }
 html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #fbfaf7; }
 body { font-family: "Inter", "Avenir Next", "Helvetica Neue", Arial, sans-serif; color: #1c2427; }
-main { position: absolute; left: 120px; right: 120px; top: 90px; height: 740px; overflow: hidden; }
+main { position: absolute; left: 120px; right: 120px; top: 90px; height: 770px; overflow: hidden; }
 main.cover { display: flex; align-items: center; }
 .fit { width: 100%; }
 
@@ -36,6 +36,3 @@ h2::before { content: ""; display: block; width: 72px; height: 8px; border-radiu
 .stat b { display: block; font-size: 84px; line-height: 1; color: #0f3a44; letter-spacing: -0.02em; }
 .stat span { display: block; font-size: 34px; line-height: 1.3; color: #4b5a5e; margin-top: 16px; }
 .stat:first-child { background: #f4e3d6; } .stat:first-child b { color: #b85e28; }
-
-footer { position: absolute; left: 0; right: 0; bottom: 0; height: 190px; background: #0f3a44; display: flex; align-items: center; justify-content: center; padding: 0 160px; }
-footer p { margin: 0; color: #fff; font-size: 44px; line-height: 1.3; font-weight: 600; text-align: center; max-width: 1600px; }

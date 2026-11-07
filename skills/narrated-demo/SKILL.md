@@ -7,13 +7,13 @@ compatibility: Python 3.10–3.12 with kokoro, markdown and soundfile; ffmpeg; G
 
 # Narrated decks
 
-Write one Markdown file, run one command, get slides with a voice and subtitles. The theme, voice, timing and
-subtitle style are fixed: do not restyle or tune them. Spend your effort on what the deck says.
+Write one Markdown file, run one command, get slides with a voice and captions. The theme, voice, timing and
+caption style are fixed: do not restyle or tune them. Spend your effort on what the deck says.
 
 ## 1. Write the deck
 
 Read the source document, pick the 4–8 points a newcomer needs, and write `<name>.md` next to where the user wants
-the result. Every `#` or `##` heading starts a slide; the `> ` lines under it are spoken, one subtitle each.
+the result. Every `#` or `##` heading starts a slide; the `> ` lines under it are spoken, one caption each.
 
 ```markdown
 ---
@@ -64,9 +64,10 @@ Rules that keep it watchable:
 python /absolute/path/to/narrated-demo/scripts/deck.py /absolute/path/to/<name>.md
 ```
 
-It writes `<name>.deck/` beside the source: `deck.json` (the player manifest), `narration.m4a`, one frame per
-spoken line, `contact.jpg` (the first frame of each slide) and `<name>.srt`. Lines and frames are cached, so a re-run
-after an edit re-voices and redraws only what changed; it takes seconds. A problem (a line too long, a slide without
+It writes `<name>.deck/` beside the source: `deck.json` (the player manifest, with each line's text and start),
+`narration.m4a`, one frame per slide, `contact.jpg` (every slide) and `<name>.srt`. Captions are text, never drawn
+into the slides: the player shows them, and the bottom fifth of every slide stays empty for them. Lines and frames are
+cached, so a re-run after an edit re-voices and redraws only what changed; it takes seconds. A problem (a line too long, a slide without
 narration) stops it with a message naming the slide.
 
 Check `contact.jpg` once: text fits, nothing is cut off, every slide says something. Fix the Markdown and re-run;
@@ -75,9 +76,10 @@ never edit the generated files. `<name>.deck/` is build output: do not commit or
 ## 3. Deliver
 
 - **In Ultimate:** link the deck's `deck.json` by its absolute path, `[My deck](/abs/path/<name>.deck/deck.json)`.
-  The transcript shows it as a slide player with audio, subtitles and slide skipping.
+  The transcript shows it as a slide player with audio, captions (CC to hide them), slide skipping and YouTube's
+  keys (Space, ←/→, F, C).
 - **Anywhere else, or when the user asks for a video:** add `--video` to write `<name>.deck/<name>.mp4`, and report
-  its path.
+  its path. The captions are a subtitle track players can turn on and off, not pixels.
 
 Report the deck path, its duration (printed by the build), and anything you left out of the source document.
 

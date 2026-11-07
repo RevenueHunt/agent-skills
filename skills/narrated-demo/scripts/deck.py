@@ -2,12 +2,13 @@
 """Turn a narrated Markdown deck into slide frames, one narration track and a deck.json player manifest.
 
     python deck.py my-talk.md            # -> my-talk.deck/deck.json, narration.m4a, frames/, contact.jpg, my-talk.srt
-    python deck.py my-talk.md --video    # also my-talk.deck/my-talk.mp4
+    python deck.py my-talk.md --video    # also my-talk.deck/my-talk.mp4, with the lines as a subtitle track
 
 Source format: optional front matter (`voice`, `speed`), then one scene per `#`/`##` heading. A `#` heading is a
 title slide; a `##` heading is a content slide whose body is ordinary Markdown. Every `> ` line in a scene is one
-spoken line and one subtitle. Spoken audio and rendered frames are cached by content, so editing one line re-voices
-that line and redraws only its frame.
+spoken line and one caption. Captions are text, never pixels: the player draws them over the slide and the MP4 carries
+them as a subtitle track. Spoken audio and rendered frames are cached by content, so editing one line re-voices that
+line and redraws nothing.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ THEME = SKILL_DIR / "assets" / "deck.css"
 WIDTH, HEIGHT = 1920, 1080
 SR = 24_000  # Kokoro's output rate
 LEAD, GAP_LINE, GAP_SCENE, TAIL = 0.6, 0.25, 0.7, 1.5
-MAX_LINE = 90  # characters in one spoken line: two subtitle rows of 45
+MAX_LINE = 90  # characters in one spoken line: two caption rows of 45
 DEFAULTS = {"voice": "af_heart", "speed": 1.1}
 
 
@@ -109,7 +110,7 @@ def body_html(markdown_text: str) -> str:
     return re.sub(r"<ul>\n?(.*?)</ul>", stats, out, flags=re.S)
 
 
-def frame_html(scene: dict, line: str, base: Path, css: str) -> str:
+def frame_html(scene: dict, base: Path, css: str) -> str:
     title = html.escape(scene["title"])
     kind = "cover" if scene["level"] == 1 else "content"
     inner = (
@@ -119,9 +120,8 @@ def frame_html(scene: dict, line: str, base: Path, css: str) -> str:
     )
     return f"""<!doctype html><html><head><meta charset="utf-8"><base href="{base.as_uri()}/">
 <style>{css}</style></head><body><main class="{kind}"><div class="fit">{inner}</div></main>
-<footer><p>{html.escape(line)}</p></footer>
 <script>
-// Shrink the slide's content until it fits above the subtitle band, down to 60 %.
+// Shrink the slide's content until it fits above the caption area, down to 60 %.
 const main = document.querySelector('main'), fit = document.querySelector('.fit');
 for (let s = 1; s > 0.6 && fit.scrollHeight * s > main.clientHeight; s -= 0.04) fit.style.zoom = s - 0.04;
 </script></body></html>"""
@@ -154,22 +154,21 @@ def screenshot(browser: str, page: Path, out: Path) -> None:
 
 
 def render_frames(scenes: list[dict], base: Path, cache: Path) -> tuple[list[Path], int]:
-    """One JPEG per spoken line (its slide with that line as subtitle), cached by its HTML and images."""
+    """One JPEG per scene, cached by its HTML and images."""
     css = THEME.read_text()
     jobs, frames = [], []
     for scene in scenes:
-        for line in scene["lines"]:
-            page = frame_html(scene, line, base, css)
-            assets = "".join(
-                f"{p}:{(base / p).stat().st_mtime_ns}"
-                for p in re.findall(r'src="([^":]+)"', page)
-                if (base / p).exists()
-            )
-            digest = hashlib.sha256((page + assets).encode()).hexdigest()[:20]
-            out = cache / "frames" / f"{digest}.jpg"
-            frames.append(out)
-            if not out.exists() and all(out != job[1] for job in jobs):
-                jobs.append((page, out))
+        page = frame_html(scene, base, css)
+        assets = "".join(
+            f"{p}:{(base / p).stat().st_mtime_ns}"
+            for p in re.findall(r'src="([^":]+)"', page)
+            if (base / p).exists()
+        )
+        digest = hashlib.sha256((page + assets).encode()).hexdigest()[:20]
+        out = cache / "frames" / f"{digest}.jpg"
+        frames.append(out)
+        if not out.exists() and all(out != job[1] for job in jobs):
+            jobs.append((page, out))
     if jobs:
         (cache / "frames").mkdir(parents=True, exist_ok=True)
         browser = chrome()
@@ -236,7 +235,7 @@ def build(source: Path, video: bool) -> Path:
             gap = TAIL if last_in_scene and number == len(scenes) - 1 else GAP_SCENE if last_in_scene else GAP_LINE
             length = len(speech) / SR
             start = 0.0 if index == 0 else t  # the first frame shows during the lead-in too
-            cues.append({"scene": number, "text": line, "image": f"frames/{frames[index].name}", "start": round(start, 3)})
+            cues.append({"scene": number, "text": line, "image": f"frames/{frames[number].name}", "start": round(start, 3)})
             srt.append(f"{index + 1}\n{timestamp(t)} --> {timestamp(t + length)}\n{textwrap.fill(line, 45)}\n")
             pieces += [speech, np.zeros(int(gap * SR), np.float32)]
             t += length + gap
@@ -246,7 +245,7 @@ def build(source: Path, video: bool) -> Path:
     (out / "frames").mkdir(parents=True, exist_ok=True)
     for old in (out / "frames").iterdir():
         old.unlink()
-    for frame in frames:
+    for frame in set(frames):
         shutil.copyfile(frame, out / "frames" / frame.name)
     with tempfile.TemporaryDirectory() as tmp:
         wav = Path(tmp) / "narration.wav"
@@ -263,6 +262,7 @@ def build(source: Path, video: bool) -> Path:
         "height": HEIGHT,
         "duration": duration,
         "audio": "narration.m4a",
+        "captions": True,  # the player draws each cue's text; the frames carry none
         "cues": cues,
     }
     (out / "deck.json").write_text(json.dumps(manifest, indent=1, ensure_ascii=False))
@@ -273,13 +273,13 @@ def build(source: Path, video: bool) -> Path:
     print(f"contact: {out / 'contact.jpg'}")
     if video:
         mp4 = out / f"{source.stem}.mp4"
-        make_video(out, cues, duration, mp4)
+        make_video(out, cues, duration, srt_path, mp4)
         print(f"video:   {mp4}")
     return out / "deck.json"
 
 
 def contact_sheet(out: Path, cues: list[dict]) -> None:
-    """The first frame of every scene on one image, for agents that check the look without a player."""
+    """Every slide on one image, for agents that check the look without a player."""
     firsts = [cue["image"] for i, cue in enumerate(cues) if i == 0 or cues[i - 1]["scene"] != cue["scene"]]
     columns = min(3, len(firsts))
     inputs = [arg for image in firsts for arg in ("-i", str(out / image))]
@@ -296,19 +296,22 @@ def contact_sheet(out: Path, cues: list[dict]) -> None:
     )
 
 
-def make_video(out: Path, cues: list[dict], duration: float, mp4: Path) -> None:
-    ends = [cue["start"] for cue in cues[1:]] + [duration]
+def make_video(out: Path, cues: list[dict], duration: float, srt: Path, mp4: Path) -> None:
+    """The slides with the narration, and the spoken lines as a subtitle track players can turn on and off."""
+    slides = [cue for i, cue in enumerate(cues) if i == 0 or cues[i - 1]["image"] != cue["image"]]
+    ends = [cue["start"] for cue in slides[1:]] + [duration]
     listing = "".join(
-        f"file '{out / cue['image']}'\nduration {end - cue['start']:.3f}\n" for cue, end in zip(cues, ends)
-    ) + f"file '{out / cues[-1]['image']}'\n"
+        f"file '{out / cue['image']}'\nduration {end - cue['start']:.3f}\n" for cue, end in zip(slides, ends)
+    ) + f"file '{out / slides[-1]['image']}'\n"
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as handle:
         handle.write(listing)
     try:
         subprocess.run(
             ["ffmpeg", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", handle.name,
-             "-i", str(out / "narration.m4a"), "-vf", "fps=25,format=yuv420p", "-c:v", "libx264",
-             "-preset", "medium", "-crf", "20", "-tune", "stillimage", "-c:a", "copy", "-shortest",
-             "-movflags", "+faststart", str(mp4)],
+             "-i", str(out / "narration.m4a"), "-i", str(srt), "-map", "0:v", "-map", "1:a", "-map", "2:s",
+             "-vf", "fps=25,format=yuv420p", "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+             "-tune", "stillimage", "-c:a", "copy", "-c:s", "mov_text", "-metadata:s:s:0", "language=eng",
+             "-disposition:s:0", "default", "-shortest", "-movflags", "+faststart", str(mp4)],
             check=True,
         )
     finally:
