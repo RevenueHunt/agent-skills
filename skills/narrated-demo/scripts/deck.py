@@ -4,7 +4,7 @@
     python deck.py my-talk.md            # -> my-talk.deck/deck.json, narration.m4a, frames/, contact.jpg, my-talk.srt
     python deck.py my-talk.md --video    # also my-talk.deck/my-talk.mp4, with the lines as a subtitle track
 
-Source format: optional front matter (`voice`, `speed`), then one scene per `#`/`##` heading. A `#` heading is a
+Source format: optional front matter (`voice`, `speed`, `pronounce`), then one scene per `#`/`##` heading. A `#` heading is a
 title slide; a `##` heading is a content slide whose body is ordinary Markdown, with highlighted code blocks,
 ```mermaid diagrams, `::: class` boxes (Pandoc's fenced divs, laid out by the theme's classes) and inline HTML. Every `> ` line in a scene is one spoken line and one caption, and shows the slide as written
 above it: narration between body lines reveals the slide step by step. Captions are text, never pixels: the player
@@ -90,6 +90,22 @@ MERMAID_BLOCK = re.compile(r"^```mermaid[ \t]*\n(.*?)^```[ \t]*$", re.S | re.M)
 # A box is Pandoc's fenced div: `::: card soft` opens one with those classes, a bare `:::` closes it.
 BOX_OPEN = re.compile(r"^ {0,3}:{3,}[ \t]*([A-Za-z][\w-]*(?:[ \t]+[A-Za-z][\w-]*)*)[ \t]*:*[ \t]*$")
 BOX_CLOSE = re.compile(r"^ {0,3}:{3,}[ \t]*$")
+# Words Kokoro's G2P (misaki) gets wrong, said as the respelling instead; captions keep the written word. Capitals
+# that are not in its dictionary are spelled letter by letter ("J-S-O-N"), which is right for API or JWT but not these.
+# A deck adds its own with `pronounce: Word=say it, Other=…` in its front matter, or one line at a time with
+# `[Word](say it)` or `[Word](/IPA/)` in the narration.
+PRONOUNCE = {
+    "JSON": "Jason",
+    "YAML": "yammel",
+    "TOML": "tommel",
+    "README": "read me",
+    "Ids": "IDs",
+    "CORS": "cores",
+    "OAuth": "oh auth",
+    "nginx": "engine x",
+    "kubectl": "cube control",
+}
+SAY_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")  # [Word](say it) or [Word](/IPA/)
 
 
 class DeckError(Exception):
@@ -141,8 +157,23 @@ def box_problem(body: str) -> str | None:
     return None
 
 
+def spoken(line: str, pronounce: dict[str, str]) -> str:
+    """The line as Kokoro should hear it: [Word](say it) and listed words become their respelling, and [Word](/IPA/)
+    stays for misaki, which reads it as those phonemes."""
+    words = "|".join(re.escape(word) for word in sorted(pronounce, key=len, reverse=True))
+    pattern = re.compile(SAY_LINK.pattern + (rf"|(?<![\w-])({words})(?![\w-])" if words else ""))
+
+    def say(match: re.Match) -> str:
+        if match[1] is None:
+            return pronounce[match[3]]
+        return match[0] if match[2].startswith("/") else match[2]
+
+    return pattern.sub(say, line)
+
+
 def parse(text: str) -> tuple[dict, list[dict]]:
-    """Front matter and scenes: [{title, level, body, lines, steps}]; steps[i] is the body shown while lines[i] is spoken."""
+    """Front matter and scenes: [{title, level, body, lines, spoken, steps}]; lines are the captions, spoken what the
+    voice says for each, and steps[i] the body shown while lines[i] is spoken."""
     meta = dict(DEFAULTS)
     if text.startswith("---\n"):
         end = text.find("\n---", 4)
@@ -154,19 +185,27 @@ def parse(text: str) -> tuple[dict, list[dict]]:
                 meta[key.strip()] = value.strip().strip("\"'")
         text = text[end + 4 :]
     meta["speed"] = float(meta["speed"])
+    pronounce = dict(PRONOUNCE)
+    for pair in meta.pop("pronounce", "").split(","):
+        if "=" in pair:
+            word, say = pair.split("=", 1)
+            pronounce[word.strip()] = say.strip()
     scenes: list[dict] = []
     fenced = False  # inside a ``` block, where `#` and `>` are code, not slides or narration
     for raw in text.splitlines():
         heading = None if fenced else re.match(r"^(#{1,2})\s+(.*)$", raw)
         if heading:
-            scenes.append({"level": len(heading[1]), "title": heading[2].strip(), "body": [], "lines": [], "marks": []})
+            scenes.append(
+                {"level": len(heading[1]), "title": heading[2].strip(), "body": [], "lines": [], "spoken": [], "marks": []}
+            )
         elif not scenes:
             if raw.strip():
                 raise DeckError("text before the first # or ## heading; every slide starts with a heading")
         elif not fenced and raw.startswith(">"):
             line = raw[1:].strip()
             if line:
-                scenes[-1]["lines"].append(line)
+                scenes[-1]["lines"].append(SAY_LINK.sub(r"\1", line))
+                scenes[-1]["spoken"].append(spoken(line, pronounce))
                 scenes[-1]["marks"].append(len(scenes[-1]["body"]))
         else:
             if raw.lstrip().startswith("```"):
@@ -446,8 +485,8 @@ def render_frames(scenes: list[dict], base: Path, cache: Path) -> tuple[list[Pat
 
 
 def voice(scenes: list[dict], meta: dict, cache: Path) -> tuple[list[Path], int]:
-    """One WAV per spoken line, cached by text, voice and speed."""
-    lines = [line for scene in scenes for line in scene["lines"]]
+    """One WAV per spoken line, cached by what is said, voice and speed."""
+    lines = [line for scene in scenes for line in scene["spoken"]]
     paths = [
         cache / "audio" / (hashlib.sha256(json.dumps([line, meta["voice"], meta["speed"]]).encode()).hexdigest()[:20] + ".wav")
         for line in lines
@@ -460,12 +499,32 @@ def voice(scenes: list[dict], meta: dict, cache: Path) -> tuple[list[Path], int]
 
         (cache / "audio").mkdir(parents=True, exist_ok=True)
         pipeline = KPipeline(lang_code=meta["voice"][0], repo_id="hexgrad/Kokoro-82M")
+        if meta["voice"][0] in "ab":
+            say_check(pipeline.g2p, [line for line, _ in missing])
         for line, path in missing:
             chunks = [np.asarray(a, dtype=np.float32) for _, _, a in pipeline(line, voice=meta["voice"], speed=meta["speed"])]
             if not chunks:
                 raise DeckError(f"Kokoro produced no audio for: {line}")
             sf.write(path, np.concatenate(chunks), SR)
     return paths, len(missing)
+
+
+def say_check(g2p, lines: list[str]) -> None:
+    """Name the capitalised words Kokoro will spell letter by letter, so one meant as a word gets a `pronounce:` entry."""
+    golds = g2p.lexicon.golds
+    spelled = {
+        token.text
+        for line in lines
+        for token in g2p(line)[1]
+        if re.fullmatch(r"[A-Z]{2,}s?", token.text)
+        and not {token.text, token.text.lower(), token.text.removesuffix("s")} & golds.keys()
+    }
+    if spelled:
+        print(
+            f"say check, spelled letter by letter: {', '.join(sorted(spelled))}\n"
+            "  fine for API or URL; for one said as a word, add `pronounce: Word=say it` to the front matter",
+            file=sys.stderr,
+        )
 
 
 # ---------- assembly ----------

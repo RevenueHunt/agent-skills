@@ -55,6 +55,12 @@ Rules that keep it watchable:
 - **One idea per spoken line**, at most 90 characters; aim for 2–4 lines per slide and 1–2 minutes in all.
 - **Write narration the way it is said.** Spell out symbols and units the voice would misread ("150 MB" →
   "a hundred and fifty megabytes", "v2" → "version two"); plain numbers are fine.
+- **Fix a word the voice gets wrong without touching the captions.** Kokoro spells unknown capitals letter by
+  letter ("J-S-O-N") and guesses unfamiliar names. Common tech words are already fixed (JSON as "Jason", YAML, TOML,
+  README, CORS, OAuth, nginx, kubectl, "Ids"). For the deck's own, add `pronounce: Klaviyo=clay vee oh, PWA=P W A`
+  to the front matter; for one line, write `[Klaviyo](clay vee oh)`, or `[Kokoro](/kˈOkəɹO/)` for exact phonemes.
+  The caption always shows the written word. The build lists the capitals it will spell out (`say check: …`): add
+  a `pronounce:` entry for any meant as a word. Names it only guesses are not listed, so listen to brand names once.
 - Images: `![](diagram.png)` with a path relative to the deck file. Tables render as they are.
 - Front matter is optional; `af_heart` at `1.1` is the default English voice.
 

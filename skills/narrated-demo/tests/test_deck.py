@@ -24,6 +24,17 @@ class DeckTests(unittest.TestCase):
         self.assertEqual(scenes[1]["lines"], ["Second.", "Third."])
         self.assertEqual(scenes[1]["body"], "- a\n- b")
 
+    def test_pronunciations_change_the_voice_but_not_the_captions(self) -> None:
+        meta, scenes = deck.parse(
+            "---\npronounce: Klaviyo=clay vee oh\n---\n\n# T\n\n"
+            "> The JSON from Klaviyo, not JSONL.\n> Ask [Sidekick](side kick) about [Kokoro](/kˈOkəɹO/).\n"
+        )
+        self.assertNotIn("pronounce", meta)
+        self.assertEqual(scenes[0]["lines"], ["The JSON from Klaviyo, not JSONL.", "Ask Sidekick about Kokoro."])
+        self.assertEqual(
+            scenes[0]["spoken"], ["The Jason from clay vee oh, not JSONL.", "Ask side kick about [Kokoro](/kˈOkəɹO/)."]
+        )
+
     def test_names_every_slide_that_needs_a_fix(self) -> None:
         with self.assertRaises(deck.DeckError) as caught:
             deck.parse("# Silent\n\nNo narration.\n\n## Wordy\n\n> " + "word " * 25 + "\n")
