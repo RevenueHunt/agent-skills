@@ -91,7 +91,64 @@ flowchart LR
 > Both meet in one deck, and an MP4 when you ask.
 ````
 
-Do not write raw HTML or CSS in a deck: the look is fixed, and Markdown, diagrams and code cover what a slide needs.
+### Layout: boxes, then HTML
+
+Plain Markdown stacks top to bottom. For columns, cards or a full-frame picture, put Markdown in a **box**: a
+`::: class …` line opens one, a line of only `:::` closes it (Pandoc's fenced divs). Boxes nest; the words after
+`:::` are classes from this list. The class names and theme variables are Sideshow's, so they read the same as in an
+html surface there.
+
+- **Layout:** `row` lays its boxes side by side, with `grow` on each box that shares the width; `stack` is a
+  column with gaps, `between` pushes two things to the ends. `sm` and `lg` tighten or widen a `row` or `stack`.
+- **Look:** `card` frames its content, `card soft` fills it, `card accent` marks the one the narration is about;
+  `title` (a card's heading, `<p class="title">`), `dim`, `faint`, `mono`, `num`.
+- **Full frame:** `bleed` around one image fills the slide edge to edge above the caption band, covering its heading.
+- **Inline, in HTML:** `<span class="badge">` with `ok`, `info`, `warn` or `danger`; `chip`, `dot`, `kbd`;
+  `<div class="bar"><i style="width: 60%"></i></div>`; `<ul class="tree">` for a nested status list.
+
+````markdown
+## Parallel or Exa
+
+::: row
+::: grow card soft
+<p class="title">Parallel</p>
+
+- On today
+
+> Today, searches go through Parallel.
+
+:::
+::: grow card accent
+<p class="title">Exa</p>
+
+- Off by default
+:::
+:::
+
+> Exa offers the same tools, off until you turn it on.
+````
+
+A spoken line inside a box builds the slide across columns: here the left card shows first, already where it ends up,
+then the right one appears beside it.
+
+When boxes cannot say it, write HTML or SVG in the deck, but keep it on the theme:
+
+- Use the classes above before writing any CSS, and never a `<style>` block. Colours and sizes come from the theme's
+  variables: `var(--color-text-primary|secondary|tertiary|info|success|warning|danger)`, the same set as
+  `--color-background-*` and `--color-border-*` (`info` is the accent), `var(--color-text-heading)`,
+  `var(--font-sans|mono)`, `var(--font-size-body|small|title)`, `var(--border-radius-md|lg|xl)`. Never a colour
+  code.
+- For a drawing: `<svg width="100%" viewBox="0 0 1680 420">` (one unit is about one pixel), with `class="t"`,
+  `ts` (small, muted) and `th` (bold) on text, `box` on rects, `arr` and `leader` on lines,
+  `marker-end="url(#arrow)"` for an arrowhead, and `c-blue`, `c-teal`, `c-amber`, `c-coral`, `c-green`, `c-red` or
+  `c-gray` on a shape or `<g>` to colour it and its text.
+- Keep it in normal flow: no `position: fixed` or `absolute`; to overlap, put both in one grid cell
+  (`display: grid`, `grid-area: 1 / 1`).
+- Nothing external: no URLs, web fonts, CDNs or scripts. Builds are offline and every frame is a still picture;
+  images are files next to the deck.
+- Flat: no gradients, shadows or emoji; sentence case.
+
+After any box or HTML, check `contact.jpg` (below): columns that wrap or text that overflows show there first.
 
 ## 2. Build and preview
 

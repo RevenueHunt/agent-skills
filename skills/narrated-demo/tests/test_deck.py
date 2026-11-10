@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -45,8 +48,68 @@ class DeckTests(unittest.TestCase):
         # Narration after the body shows the whole slide on every line, as before steps existed.
         self.assertEqual(late["steps"], [late["body"], late["body"]])
         step = deck.frame_html(plan, Path("/tmp"), "", plan["steps"][0])
-        self.assertIn("class='ghost'", step)
-        self.assertNotIn("ghost", deck.frame_html(plan, Path("/tmp"), "", plan["steps"][1]))
+        self.assertIn("<template class='step'>", step)
+        self.assertNotIn("<template", deck.frame_html(plan, Path("/tmp"), "", plan["steps"][1]))
+
+    def test_boxes_nest_carry_classes_and_leave_code_alone(self) -> None:
+        page = deck.body_html(
+            "::: row\n::: grow card soft\n**Before**\n\n- one\n:::\n::: grow\n```python\n:::\nx = 1\n```\n:::\n:::\n\n"
+            "```mermaid\nflowchart LR\n  A:::accent --> B\n```",
+            {"flowchart LR\n  A:::accent --> B": "<svg>drawn</svg>"},
+        )
+        self.assertIn('<div class="row">\n<div class="grow card soft">\n<p><strong>Before</strong></p>\n<ul>\n<li>one</li>', page)
+        self.assertIn('</ul>\n</div>\n<div class="grow">\n<div class="hl">', page)
+        self.assertIn('<span class="p">:::</span>', page)  # a ::: line inside code is code
+        self.assertIn('<div class="diagram"><svg>drawn</svg></div>', page)
+        self.assertEqual(page.count("<div"), page.count("</div>"))
+        self.assertNotIn("markdown=", page)
+
+    def test_unbalanced_boxes_name_the_slide(self) -> None:
+        with self.assertRaises(deck.DeckError) as caught:
+            deck.parse("## Open\n\n::: row\ntext\n\n> Spoken.\n\n## Stray\n\ntext\n:::\n\n> Spoken.\n")
+        message = str(caught.exception)
+        self.assertIn("scene 1 (Open): 1 box(es) opened with '::: class' never close", message)
+        self.assertIn("scene 2 (Stray): a bare ':::' closes no box", message)
+
+    def test_a_step_that_ends_inside_boxes_closes_them(self) -> None:
+        _, scenes = deck.parse(
+            "## Compare\n\n::: row\n::: grow\nBefore\n\n> First.\n\n:::\n::: grow\nAfter\n:::\n:::\n\n> Second.\n"
+        )
+        first = scenes[0]["steps"][0]
+        self.assertEqual(first, "::: row\n::: grow\nBefore")
+        self.assertEqual(deck.body_html(first), '<div class="row">\n<div class="grow">\n<p>Before</p>\n</div>\n</div>')
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg required")
+    def test_a_step_across_columns_shows_the_finished_layout(self) -> None:
+        # Rendering only the step would give its one column the whole width; it must sit where the finished slide puts it.
+        try:
+            browser = deck.chrome()
+        except deck.DeckError:
+            self.skipTest("Chrome required")
+        _, scenes = deck.parse(
+            "## Compare\n\n::: row\n::: grow\n- left one\n- left two\n\n> First.\n\n:::\n::: grow\n- right\n:::\n:::\n\n> Second.\n"
+        )
+        css = deck.THEME.read_text()
+        with tempfile.TemporaryDirectory() as tmp:
+            gray = []
+            for index, shown in enumerate(scenes[0]["steps"]):
+                page = Path(tmp) / f"{index}.html"
+                page.write_text(deck.frame_html(scenes[0], Path(tmp), css, shown))
+                deck.screenshot(browser, page, Path(tmp) / f"{index}.jpg")
+                gray.append(subprocess.run(
+                    ["ffmpeg", "-loglevel", "error", "-i", str(Path(tmp) / f"{index}.jpg"), "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                    check=True, capture_output=True,
+                ).stdout)
+        step, done = gray
+
+        def differing(left: int, right: int) -> int:
+            return sum(
+                abs(step[y * deck.WIDTH + x] - done[y * deck.WIDTH + x]) > 40
+                for y in range(0, deck.HEIGHT, 2) for x in range(left, right, 2)
+            )
+
+        self.assertEqual(differing(0, 960), 0)  # the left column, exactly where it ends up
+        self.assertGreater(differing(960, deck.WIDTH), 100)  # the right column, not said yet
 
     def test_code_blocks_keep_their_hashes_and_quotes(self) -> None:
         # A `> ` line in a diff became narration and a `# ` comment a new slide (trial run of the example deck).

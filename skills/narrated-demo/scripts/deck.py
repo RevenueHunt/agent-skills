@@ -5,8 +5,8 @@
     python deck.py my-talk.md --video    # also my-talk.deck/my-talk.mp4, with the lines as a subtitle track
 
 Source format: optional front matter (`voice`, `speed`), then one scene per `#`/`##` heading. A `#` heading is a
-title slide; a `##` heading is a content slide whose body is ordinary Markdown, with highlighted code blocks and
-```mermaid diagrams. Every `> ` line in a scene is one spoken line and one caption, and shows the slide as written
+title slide; a `##` heading is a content slide whose body is ordinary Markdown, with highlighted code blocks,
+```mermaid diagrams, `::: class` boxes (Pandoc's fenced divs, laid out by the theme's classes) and inline HTML. Every `> ` line in a scene is one spoken line and one caption, and shows the slide as written
 above it: narration between body lines reveals the slide step by step. Captions are text, never pixels: the player
 draws them over the slide and the MP4 carries them as a subtitle track. Spoken audio, diagrams and rendered frames are
 cached by content, so editing one line re-voices that line and redraws nothing.
@@ -87,6 +87,9 @@ MERMAID_CONFIG = {
 }
 LIST_ITEM = re.compile(r"^\s*([-*+]|\d+[.)])\s")
 MERMAID_BLOCK = re.compile(r"^```mermaid[ \t]*\n(.*?)^```[ \t]*$", re.S | re.M)
+# A box is Pandoc's fenced div: `::: card soft` opens one with those classes, a bare `:::` closes it.
+BOX_OPEN = re.compile(r"^ {0,3}:{3,}[ \t]*([A-Za-z][\w-]*(?:[ \t]+[A-Za-z][\w-]*)*)[ \t]*:*[ \t]*$")
+BOX_CLOSE = re.compile(r"^ {0,3}:{3,}[ \t]*$")
 
 
 class DeckError(Exception):
@@ -94,6 +97,48 @@ class DeckError(Exception):
 
 
 # ---------- parsing ----------
+
+
+def box_lines(text: str):
+    """Each line with what it does to boxes: ('open', classes), ('close', '') or ('text', line). Code blocks are text."""
+    fenced = False
+    for raw in text.splitlines():
+        if raw.lstrip().startswith("```"):
+            fenced = not fenced
+        elif not fenced and (opening := BOX_OPEN.match(raw)):
+            yield "open", " ".join(opening[1].split())
+            continue
+        elif not fenced and BOX_CLOSE.match(raw):
+            yield "close", ""
+            continue
+        yield "text", raw
+
+
+def boxes(text: str) -> str:
+    """`::: a b` … `:::` as <div class="a b" markdown="1"> … </div>, for md_in_html. Boxes still open at the end close
+    there, so a step that stops inside a box is still whole."""
+    out, depth = [], 0
+    for kind, value in box_lines(text):
+        if kind == "open":
+            out += ["", f'<div class="{value}" markdown="1">', ""]
+            depth += 1
+        elif kind == "close" and depth:
+            out += ["", "</div>", ""]
+            depth -= 1
+        else:
+            out.append(value if kind == "text" else ":::")
+    return "\n".join(out + ["", "</div>", ""] * depth)
+
+
+def box_problem(body: str) -> str | None:
+    depth = 0
+    for kind, _ in box_lines(body):
+        depth += {"open": 1, "close": -1}.get(kind, 0)
+        if depth < 0:
+            return "a bare ':::' closes no box; remove it, or open the box with '::: class'"
+    if depth:
+        return f"{depth} box(es) opened with '::: class' never close; end each with a line of only ':::'"
+    return None
 
 
 def parse(text: str) -> tuple[dict, list[dict]]:
@@ -147,6 +192,8 @@ def parse(text: str) -> tuple[dict, list[dict]]:
         scene["body"] = "\n".join(body).strip()
         if not scene["lines"]:
             problems.append(f"scene {number} ({scene['title']}): no narration; add at least one '> ' line")
+        if problem := box_problem(scene["body"]):
+            problems.append(f"scene {number} ({scene['title']}): {problem}")
         for line in scene["lines"]:
             if len(line) > MAX_LINE:
                 problems.append(
@@ -171,10 +218,10 @@ def body_html(markdown_text: str, diagrams: dict[str, str] | None = None) -> str
         blocks.append((diagrams or {}).get(match[1].strip(), ""))
         return f"\n\nDIAGRAM{len(blocks) - 1}\n\n"
 
-    markdown_text = MERMAID_BLOCK.sub(stash, markdown_text)
+    markdown_text = boxes(MERMAID_BLOCK.sub(stash, markdown_text))
     out = markdown.markdown(
         markdown_text,
-        extensions=["tables", "fenced_code", "sane_lists", "codehilite"],
+        extensions=["tables", "fenced_code", "sane_lists", "codehilite", "md_in_html"],
         extension_configs={"codehilite": {"guess_lang": False, "css_class": "hl"}},
     )
     out = re.sub(r"<p>DIAGRAM(\d+)</p>", lambda m: f'<div class="diagram">{blocks[int(m[1])]}</div>', out)
@@ -205,15 +252,45 @@ def frame_html(scene: dict, base: Path, css: str, shown: str | None = None, diag
 
     inner = layer(scene["body"])
     if shown is not None and shown != scene["body"]:
-        # A step lies over an invisible copy of the whole slide, so it sizes and places like the finished slide.
-        inner = f"<div class='steps'><div class='ghost'>{inner}</div><div>{layer(shown)}</div></div>"
+        # A step is the finished slide with what is not said yet hidden, so nothing moves while a slide builds, in
+        # columns and cards too. The step's own render, never shown, says how much of the slide's text is out so far.
+        inner += f"<template class='step'>{layer(shown)}</template>"
     return f"""<!doctype html><html><head><meta charset="utf-8"><base href="{base.as_uri()}/">
-<style>{css}</style></head><body><main class="{kind}"><div class="fit">{inner}</div></main>
+<style>{css}</style></head><body>{SVG_DEFS}<main class="{kind}"><div class="fit">{inner}</div></main>
 <script>
 // Shrink the slide's content until it fits above the caption area, down to 60 %.
 const main = document.querySelector('main'), fit = document.querySelector('.fit');
 for (let s = 1; s > 0.6 && fit.scrollHeight * s > main.clientHeight; s -= 0.04) fit.style.zoom = s - 0.04;
+const step = document.querySelector('template.step');
+if (step) {{
+  // Text and pictures in reading order; a picture or drawing counts as one.
+  const parts = root => {{
+    const found = [];
+    const walk = node => {{
+      for (const child of node.childNodes) {{
+        if (child.nodeType === Node.TEXT_NODE) {{ if (child.data.trim()) found.push(child); }}
+        else if (child.matches?.('img, svg')) found.push(child);
+        else if (child.nodeType === Node.ELEMENT_NODE && !child.matches('style, script, template')) walk(child);
+      }}
+    }};
+    walk(root);
+    return found;
+  }};
+  const visible = new Set();
+  for (const part of parts(fit).slice(0, parts(step.content).length))
+    for (let node = part; node !== fit; node = node.parentNode) visible.add(node);
+  for (const element of fit.querySelectorAll('*'))
+    if (!element.parentElement.closest('svg')) element.style.visibility = visible.has(element) ? 'visible' : 'hidden';
+}}
 </script></body></html>"""
+
+
+# Sideshow's arrowhead (see NOTICE): `marker-end="url(#arrow)"` ends a line in its own stroke colour.
+SVG_DEFS = (
+    '<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="arrow" viewBox="0 0 10 10"'
+    ' refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">'
+    '<path d="M0 0L10 5L0 10z" fill="context-stroke"/></marker></defs></svg>'
+)
 
 
 def chrome() -> str:
@@ -230,14 +307,25 @@ def chrome() -> str:
     raise DeckError("no Chrome or Chromium found; set CHROME=/path/to/chrome")
 
 
+def run_chrome(browser: str, args: list[str], **options) -> subprocess.CompletedProcess:
+    """Headless Chrome on a fresh profile. Now and then it exits with status 2 and the same run then works (seen on
+    macOS in #21532, about one run in ten), so a failed run is retried once before the build stops."""
+    for attempt in (1, 2):
+        with tempfile.TemporaryDirectory() as profile:
+            try:
+                return subprocess.run(
+                    [browser, "--headless", "--disable-gpu", "--allow-file-access-from-files", f"--user-data-dir={profile}",
+                     f"--window-size={WIDTH},{HEIGHT}", *args],
+                    check=True, capture_output=True, **options,
+                )
+            except subprocess.CalledProcessError:
+                if attempt == 2:
+                    raise
+
+
 def screenshot(browser: str, page: Path, out: Path) -> None:
     png = out.with_suffix(".png")
-    with tempfile.TemporaryDirectory() as profile:
-        subprocess.run(
-            [browser, "--headless", "--disable-gpu", "--hide-scrollbars", "--allow-file-access-from-files",
-             f"--user-data-dir={profile}", f"--window-size={WIDTH},{HEIGHT}", f"--screenshot={png}", page.as_uri()],
-            check=True, capture_output=True,
-        )
+    run_chrome(browser, ["--hide-scrollbars", f"--screenshot={png}", page.as_uri()])
     subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(png), "-q:v", "3", str(out)], check=True)
     png.unlink()
 
@@ -302,11 +390,7 @@ mermaid.initialize({config});
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "diagrams.html"
             path.write_text(page)
-            dom = subprocess.run(
-                [chrome(), "--headless", "--disable-gpu", "--allow-file-access-from-files", f"--user-data-dir={tmp}/profile",
-                 f"--window-size={WIDTH},{HEIGHT}", "--virtual-time-budget=30000", "--dump-dom", path.as_uri()],
-                check=True, capture_output=True, text=True,
-            ).stdout
+            dom = run_chrome(chrome(), ["--virtual-time-budget=30000", "--dump-dom", path.as_uri()], text=True).stdout
         found = re.search(r'<pre id="out">(.*?)</pre>', dom, flags=re.S)
         if not found or not found[1]:
             raise DeckError("Mermaid did not finish drawing the diagrams in Chrome")
