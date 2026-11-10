@@ -4,3 +4,4 @@ numpy>=1.26,<3
 soundfile>=0.13,<1
 kokoro>=0.9.4,<1
 markdown>=3.6,<4
+pygments>=2.17,<3

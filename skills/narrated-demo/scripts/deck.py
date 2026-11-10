@@ -5,10 +5,11 @@
     python deck.py my-talk.md --video    # also my-talk.deck/my-talk.mp4, with the lines as a subtitle track
 
 Source format: optional front matter (`voice`, `speed`), then one scene per `#`/`##` heading. A `#` heading is a
-title slide; a `##` heading is a content slide whose body is ordinary Markdown. Every `> ` line in a scene is one
-spoken line and one caption. Captions are text, never pixels: the player draws them over the slide and the MP4 carries
-them as a subtitle track. Spoken audio and rendered frames are cached by content, so editing one line re-voices that
-line and redraws nothing.
+title slide; a `##` heading is a content slide whose body is ordinary Markdown, with highlighted code blocks and
+```mermaid diagrams. Every `> ` line in a scene is one spoken line and one caption, and shows the slide as written
+above it: narration between body lines reveals the slide step by step. Captions are text, never pixels: the player
+draws them over the slide and the MP4 carries them as a subtitle track. Spoken audio, diagrams and rendered frames are
+cached by content, so editing one line re-voices that line and redraws nothing.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -34,6 +36,57 @@ SR = 24_000  # Kokoro's output rate
 LEAD, GAP_LINE, GAP_SCENE, TAIL = 0.6, 0.25, 0.7, 1.5
 MAX_LINE = 90  # characters in one spoken line: two caption rows of 45
 DEFAULTS = {"voice": "af_heart", "speed": 1.1}
+CODE_STYLE = "github-dark"  # Pygments style for code blocks, on the theme's dark code background
+# Mermaid draws ```mermaid blocks in Chrome. It is downloaded once, pinned and checked, like the voice model.
+MERMAID_VERSION = "11.17.2"
+MERMAID_URL = f"https://cdn.jsdelivr.net/npm/mermaid@{MERMAID_VERSION}/dist/mermaid.min.js"
+MERMAID_SHA256 = "581ed7d74bd9048d0e3a91363927d72ef22942d7722546b27f7cc29e35390eb8"
+MERMAID_CACHE = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "narrated-demo"
+# The theme's colours for diagrams and charts; authors never set colours. Sizes stay Mermaid's defaults, which every
+# diagram type lays out for, and each drawing is scaled up by DIAGRAM_SCALE to read at 1920 wide.
+DIAGRAM_SCALE = 1.8
+MERMAID_CONFIG = {
+    "startOnLoad": False,
+    "theme": "base",
+    "fontFamily": '"Inter", "Avenir Next", "Helvetica Neue", Arial, sans-serif',
+    "themeVariables": {
+        "primaryColor": "#f0ece2",
+        "primaryBorderColor": "#0f3a44",
+        "primaryTextColor": "#1c2427",
+        "lineColor": "#5f6d70",
+        "secondaryColor": "#f4e3d6",
+        "tertiaryColor": "#fbfaf7",
+        "clusterBkg": "#f4f1ea",
+        "clusterBorder": "#d8d2c4",
+        "edgeLabelBackground": "#fbfaf7",
+        "noteBkgColor": "#f4e3d6",
+        "noteBorderColor": "#d0743c",
+        "actorBkg": "#f0ece2",
+        "actorBorder": "#0f3a44",
+        "signalColor": "#5f6d70",
+        "pie1": "#d0743c", "pie2": "#0f3a44", "pie3": "#7a9ea3", "pie4": "#e8b48f", "pie5": "#4b5a5e", "pie6": "#c9d6d3",
+        "pieOpacity": "1", "pieStrokeColor": "#fbfaf7", "pieStrokeWidth": "2px", "pieOuterStrokeWidth": "0px",
+        "pieSectionTextColor": "#ffffff",
+        "xyChart": {
+            "backgroundColor": "#fbfaf7",
+            "plotColorPalette": "#d0743c, #0f3a44, #7a9ea3, #e8b48f",
+            "titleColor": "#0f3a44",
+            "xAxisLabelColor": "#4b5a5e", "xAxisTitleColor": "#4b5a5e", "xAxisLineColor": "#5f6d70",
+            "xAxisTickColor": "#5f6d70",
+            "yAxisLabelColor": "#4b5a5e", "yAxisTitleColor": "#4b5a5e", "yAxisLineColor": "#5f6d70",
+            "yAxisTickColor": "#5f6d70",
+        },
+    },
+    "themeCSS": (
+        ".node rect, .node polygon, rect.actor { rx: 10px; ry: 10px; stroke-width: 1.2px; } .flowchart-link { stroke-width: 1.6px; }"
+        " .node.accent rect, .node.accent polygon, .node.accent path"
+        " { fill: #f4e3d6 !important; stroke: #d0743c !important; stroke-width: 1.8px !important; }"
+    ),
+    "flowchart": {"curve": "basis"},
+    "xyChart": {"width": 860, "height": 340},  # wide and short: a slide is wide, and the title takes the top
+}
+LIST_ITEM = re.compile(r"^\s*([-*+]|\d+[.)])\s")
+MERMAID_BLOCK = re.compile(r"^```mermaid[ \t]*\n(.*?)^```[ \t]*$", re.S | re.M)
 
 
 class DeckError(Exception):
@@ -44,7 +97,7 @@ class DeckError(Exception):
 
 
 def parse(text: str) -> tuple[dict, list[dict]]:
-    """Front matter and scenes: [{title, level, body, lines}]."""
+    """Front matter and scenes: [{title, level, body, lines, steps}]; steps[i] is the body shown while lines[i] is spoken."""
     meta = dict(DEFAULTS)
     if text.startswith("---\n"):
         end = text.find("\n---", 4)
@@ -57,24 +110,41 @@ def parse(text: str) -> tuple[dict, list[dict]]:
         text = text[end + 4 :]
     meta["speed"] = float(meta["speed"])
     scenes: list[dict] = []
+    fenced = False  # inside a ``` block, where `#` and `>` are code, not slides or narration
     for raw in text.splitlines():
-        heading = re.match(r"^(#{1,2})\s+(.*)$", raw)
+        heading = None if fenced else re.match(r"^(#{1,2})\s+(.*)$", raw)
         if heading:
-            scenes.append({"level": len(heading[1]), "title": heading[2].strip(), "body": [], "lines": []})
+            scenes.append({"level": len(heading[1]), "title": heading[2].strip(), "body": [], "lines": [], "marks": []})
         elif not scenes:
             if raw.strip():
                 raise DeckError("text before the first # or ## heading; every slide starts with a heading")
-        elif raw.startswith(">"):
+        elif not fenced and raw.startswith(">"):
             line = raw[1:].strip()
             if line:
                 scenes[-1]["lines"].append(line)
+                scenes[-1]["marks"].append(len(scenes[-1]["body"]))
         else:
+            if raw.lstrip().startswith("```"):
+                fenced = not fenced
             scenes[-1]["body"].append(raw)
     if not scenes:
         raise DeckError("no scenes: start each slide with a # or ## heading")
     problems = []
     for number, scene in enumerate(scenes, 1):
-        scene["body"] = "\n".join(scene["body"]).strip()
+        body, marks = scene["body"], scene.pop("marks")
+        # A list read out item by item stays one tight list: drop the blank lines that only framed its narration,
+        # or Markdown makes it a loose list and the spacing jumps between steps.
+        for i in reversed(range(len(marks))):
+            before = after = marks[i]
+            while before and not body[before - 1].strip():
+                before -= 1
+            while after < len(body) and not body[after].strip():
+                after += 1
+            if before and after < len(body) and LIST_ITEM.match(body[before - 1]) and LIST_ITEM.match(body[after]):
+                del body[before:after]
+                marks = [before if before <= m <= after else m - (after - before) if m > after else m for m in marks]
+        scene["steps"] = ["\n".join(body[:mark]).strip() for mark in marks]
+        scene["body"] = "\n".join(body).strip()
         if not scene["lines"]:
             problems.append(f"scene {number} ({scene['title']}): no narration; add at least one '> ' line")
         for line in scene["lines"]:
@@ -91,10 +161,23 @@ def parse(text: str) -> tuple[dict, list[dict]]:
 # ---------- slides ----------
 
 
-def body_html(markdown_text: str) -> str:
+def body_html(markdown_text: str, diagrams: dict[str, str] | None = None) -> str:
     import markdown
 
-    out = markdown.markdown(markdown_text, extensions=["tables", "fenced_code", "sane_lists"])
+    # Diagrams go in after Markdown, so it never sees their SVG.
+    blocks: list[str] = []
+
+    def stash(match: re.Match) -> str:
+        blocks.append((diagrams or {}).get(match[1].strip(), ""))
+        return f"\n\nDIAGRAM{len(blocks) - 1}\n\n"
+
+    markdown_text = MERMAID_BLOCK.sub(stash, markdown_text)
+    out = markdown.markdown(
+        markdown_text,
+        extensions=["tables", "fenced_code", "sane_lists", "codehilite"],
+        extension_configs={"codehilite": {"guess_lang": False, "css_class": "hl"}},
+    )
+    out = re.sub(r"<p>DIAGRAM(\d+)</p>", lambda m: f'<div class="diagram">{blocks[int(m[1])]}</div>', out)
     # A list whose every item opens with a bold number becomes a row of stat tiles: "- **328 ha** official area".
     # Bold labels ("**Setup** — …") stay a list: as tiles they wrap into huge headings.
     def stats(match: re.Match) -> str:
@@ -110,14 +193,20 @@ def body_html(markdown_text: str) -> str:
     return re.sub(r"<ul>\n?(.*?)</ul>", stats, out, flags=re.S)
 
 
-def frame_html(scene: dict, base: Path, css: str) -> str:
+def frame_html(scene: dict, base: Path, css: str, shown: str | None = None, diagrams: dict[str, str] | None = None) -> str:
+    """One frame of a scene, showing `shown` (default: the whole body) where the whole slide would put it."""
     title = html.escape(scene["title"])
     kind = "cover" if scene["level"] == 1 else "content"
-    inner = (
-        f"<h1>{title}</h1><div class='lede'>{body_html(scene['body'])}</div>"
-        if kind == "cover"
-        else f"<h2>{title}</h2><div class='body'>{body_html(scene['body'])}</div>"
-    )
+
+    def layer(body: str) -> str:
+        if kind == "cover":
+            return f"<h1>{title}</h1><div class='lede'>{body_html(body, diagrams)}</div>"
+        return f"<h2>{title}</h2><div class='body'>{body_html(body, diagrams)}</div>"
+
+    inner = layer(scene["body"])
+    if shown is not None and shown != scene["body"]:
+        # A step lies over an invisible copy of the whole slide, so it sizes and places like the finished slide.
+        inner = f"<div class='steps'><div class='ghost'>{inner}</div><div>{layer(shown)}</div></div>"
     return f"""<!doctype html><html><head><meta charset="utf-8"><base href="{base.as_uri()}/">
 <style>{css}</style></head><body><main class="{kind}"><div class="fit">{inner}</div></main>
 <script>
@@ -153,12 +242,99 @@ def screenshot(browser: str, page: Path, out: Path) -> None:
     png.unlink()
 
 
+def code_css() -> str:
+    from pygments.formatters import HtmlFormatter
+
+    return HtmlFormatter(style=CODE_STYLE).get_style_defs(".body .hl")
+
+
+def mermaid_js() -> Path:
+    """The pinned Mermaid build, downloaded and checked on first use."""
+    path = MERMAID_CACHE / f"mermaid-{MERMAID_VERSION}.min.js"
+    if path.exists():
+        return path
+    print(f"downloading Mermaid {MERMAID_VERSION} (3.5 MB, once) to {path}", file=sys.stderr)
+    try:
+        with urllib.request.urlopen(MERMAID_URL, timeout=60) as response:
+            data = response.read()
+    except OSError as error:
+        raise DeckError(f"diagrams need Mermaid, downloaded once from {MERMAID_URL}: {error}") from error
+    if hashlib.sha256(data).hexdigest() != MERMAID_SHA256:
+        raise DeckError(f"the Mermaid download from {MERMAID_URL} does not match its pinned checksum; not using it")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_suffix(".part")
+    partial.write_bytes(data)
+    partial.replace(path)
+    return path
+
+
+def draw_diagrams(scenes: list[dict], cache: Path) -> dict[str, str]:
+    """Every ```mermaid block as SVG in the theme, keyed by its source and cached by source and config."""
+    config = json.dumps(MERMAID_CONFIG, sort_keys=True)
+    drawn_by = MERMAID_VERSION + config + str(DIAGRAM_SCALE)
+    wanted: dict[str, tuple[int, str]] = {}
+    for number, scene in enumerate(scenes, 1):
+        for match in MERMAID_BLOCK.finditer(scene["body"]):
+            wanted.setdefault(match[1].strip(), (number, scene["title"]))
+    paths = {
+        source: cache / "diagrams" / (hashlib.sha256((source + drawn_by).encode()).hexdigest()[:20] + ".svg")
+        for source in wanted
+    }
+    missing = [source for source, path in paths.items() if not path.exists()]
+    if missing:
+        # Each diagram's id is unique to it, so two on one slide keep their own styles.
+        ids = ["d" + paths[source].stem for source in missing]
+        # One Chrome run renders them all, and prints each SVG or Mermaid's error into the page for --dump-dom.
+        page = f"""<!doctype html><html><head><meta charset="utf-8"></head><body><pre id="out"></pre>
+<script src="{mermaid_js().as_uri()}"></script>
+<script>
+mermaid.initialize({config});
+(async () => {{
+  const results = [];
+  const ids = {json.dumps(ids)};
+  for (const [i, source] of {json.dumps(missing)}.entries()) {{
+    try {{ results.push({{ svg: (await mermaid.render(ids[i], source)).svg }}); }}
+    catch (error) {{ results.push({{ error: String(error && error.message || error) }}); }}
+  }}
+  document.getElementById('out').textContent = JSON.stringify(results);
+}})();
+</script></body></html>"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "diagrams.html"
+            path.write_text(page)
+            dom = subprocess.run(
+                [chrome(), "--headless", "--disable-gpu", "--allow-file-access-from-files", f"--user-data-dir={tmp}/profile",
+                 f"--window-size={WIDTH},{HEIGHT}", "--virtual-time-budget=30000", "--dump-dom", path.as_uri()],
+                check=True, capture_output=True, text=True,
+            ).stdout
+        found = re.search(r'<pre id="out">(.*?)</pre>', dom, flags=re.S)
+        if not found or not found[1]:
+            raise DeckError("Mermaid did not finish drawing the diagrams in Chrome")
+        problems = []
+        for source, result in zip(missing, json.loads(html.unescape(found[1]))):
+            if "error" in result:
+                number, title = wanted[source]
+                problems.append(f"scene {number} ({title}): Mermaid cannot draw this diagram: {result['error'].strip()}")
+            else:
+                paths[source].parent.mkdir(parents=True, exist_ok=True)
+                svg = result["svg"]
+                # Mermaid caps the drawing at its natural width; allow DIAGRAM_SCALE times that.
+                width = re.search(r'<svg[^>]*?viewBox="[-\d.]+ [-\d.]+ ([\d.]+)', svg)
+                if width:
+                    svg = re.sub(r"max-width:\s*[\d.]+px", f"max-width: {float(width[1]) * DIAGRAM_SCALE:.0f}px", svg, count=1)
+                paths[source].write_text(svg)
+        if problems:
+            raise DeckError("\n".join(problems))
+    return {source: path.read_text() for source, path in paths.items()}
+
+
 def render_frames(scenes: list[dict], base: Path, cache: Path) -> tuple[list[Path], int]:
-    """One JPEG per scene, cached by its HTML and images."""
-    css = THEME.read_text()
+    """One JPEG per spoken line (equal steps share one), cached by its HTML and images."""
+    css = code_css() + THEME.read_text()  # the theme's own code rules come last and win
+    diagrams = draw_diagrams(scenes, cache)
     jobs, frames = [], []
-    for scene in scenes:
-        page = frame_html(scene, base, css)
+    for scene, shown in ((scene, shown) for scene in scenes for shown in scene["steps"]):
+        page = frame_html(scene, base, css, shown, diagrams)
         assets = "".join(
             f"{p}:{(base / p).stat().st_mtime_ns}"
             for p in re.findall(r'src="([^":]+)"', page)
@@ -235,7 +411,7 @@ def build(source: Path, video: bool) -> Path:
             gap = TAIL if last_in_scene and number == len(scenes) - 1 else GAP_SCENE if last_in_scene else GAP_LINE
             length = len(speech) / SR
             start = 0.0 if index == 0 else t  # the first frame shows during the lead-in too
-            cues.append({"scene": number, "text": line, "image": f"frames/{frames[number].name}", "start": round(start, 3)})
+            cues.append({"scene": number, "text": line, "image": f"frames/{frames[index].name}", "start": round(start, 3)})
             srt.append(f"{index + 1}\n{timestamp(t)} --> {timestamp(t + length)}\n{textwrap.fill(line, 45)}\n")
             pieces += [speech, np.zeros(int(gap * SR), np.float32)]
             t += length + gap
@@ -279,15 +455,15 @@ def build(source: Path, video: bool) -> Path:
 
 
 def contact_sheet(out: Path, cues: list[dict]) -> None:
-    """Every slide on one image, for agents that check the look without a player."""
-    firsts = [cue["image"] for i, cue in enumerate(cues) if i == 0 or cues[i - 1]["scene"] != cue["scene"]]
-    columns = min(3, len(firsts))
-    inputs = [arg for image in firsts for arg in ("-i", str(out / image))]
-    pad = "".join(f"[{i}:v]scale=640:360[s{i}];" for i in range(len(firsts)))
-    layout = "|".join(f"{(i % columns) * 640}_{(i // columns) * 360}" for i in range(len(firsts)))
+    """Every slide on one image, as it looks at its last step, for agents that check the look without a player."""
+    slides = [cue["image"] for i, cue in enumerate(cues) if i == len(cues) - 1 or cues[i + 1]["scene"] != cue["scene"]]
+    columns = min(3, len(slides))
+    inputs = [arg for image in slides for arg in ("-i", str(out / image))]
+    pad = "".join(f"[{i}:v]scale=640:360[s{i}];" for i in range(len(slides)))
+    layout = "|".join(f"{(i % columns) * 640}_{(i // columns) * 360}" for i in range(len(slides)))
     graph = (
-        pad + "".join(f"[s{i}]" for i in range(len(firsts))) + f"xstack=inputs={len(firsts)}:layout={layout}:fill=white"
-        if len(firsts) > 1
+        pad + "".join(f"[s{i}]" for i in range(len(slides))) + f"xstack=inputs={len(slides)}:layout={layout}:fill=white"
+        if len(slides) > 1
         else "[0:v]scale=640:360"
     )
     subprocess.run(

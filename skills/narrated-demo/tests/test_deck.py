@@ -36,6 +36,31 @@ class DeckTests(unittest.TestCase):
         # Bold labels stay a list (trial run: they became oversized tiles).
         self.assertIn("<ul>", deck.body_html("- **Setup** — once\n- **Run** — daily"))
 
+    def test_narration_between_body_lines_reveals_the_slide_in_steps(self) -> None:
+        _, scenes = deck.parse("## Plan\n\n- one\n\n> First.\n\n- two\n\n> Second.\n\n## Late\n\n- a\n- b\n\n> Only.\n> After.\n")
+        plan, late = scenes
+        # The list stays one tight list: the blank lines only framed the narration.
+        self.assertEqual(plan["body"], "- one\n- two")
+        self.assertEqual(plan["steps"], ["- one", "- one\n- two"])
+        # Narration after the body shows the whole slide on every line, as before steps existed.
+        self.assertEqual(late["steps"], [late["body"], late["body"]])
+        step = deck.frame_html(plan, Path("/tmp"), "", plan["steps"][0])
+        self.assertIn("class='ghost'", step)
+        self.assertNotIn("ghost", deck.frame_html(plan, Path("/tmp"), "", plan["steps"][1]))
+
+    def test_code_blocks_keep_their_hashes_and_quotes(self) -> None:
+        # A `> ` line in a diff became narration and a `# ` comment a new slide (trial run of the example deck).
+        _, scenes = deck.parse("## Diff\n\n```diff\n# header\n- > old\n+ > new\n```\n\n> Spoken.\n")
+        self.assertEqual(len(scenes), 1)
+        self.assertEqual(scenes[0]["lines"], ["Spoken."])
+        self.assertIn("+ > new", scenes[0]["body"])
+
+    def test_code_is_highlighted_and_diagrams_become_their_svg(self) -> None:
+        page = deck.body_html("```python\nx = 1\n```\n\n```mermaid\nflowchart TD\n  A --> B\n```", {"flowchart TD\n  A --> B": "<svg>drawn</svg>"})
+        self.assertIn('<div class="hl">', page)
+        self.assertIn('<div class="diagram"><svg>drawn</svg></div>', page)
+        self.assertNotIn("flowchart", page)
+
     def test_slides_carry_no_spoken_text(self) -> None:
         # Captions are drawn by the player and the MP4's subtitle track, so one frame serves the whole scene.
         _, scenes = deck.parse("## Points\n\n- a\n\n> Spoken first.\n> Spoken second.\n")

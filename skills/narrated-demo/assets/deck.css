@@ -21,6 +21,25 @@ h2::before { content: ""; display: block; width: 72px; height: 8px; border-radiu
 .body code { font-family: "SF Mono", Menlo, monospace; font-size: 0.86em; background: #eceae3; border-radius: 10px; padding: 2px 12px; }
 .body pre { background: #13252b; color: #e7efe9; border-radius: 22px; padding: 30px 38px; font-size: 32px; line-height: 1.45; margin: 0 0 26px; overflow: hidden; }
 .body pre code { background: none; padding: 0; color: inherit; font-size: 1em; }
+
+/* Highlighted code (Pygments): the theme's dark panel, added and removed lines tinted, hl_lines marked. */
+.body .hl { background: none; color: #e7efe9; }
+.body .hl pre { line-height: 1.45; }
+.body .hl pre span { background: none; }
+.body .hl .hll { display: block; margin: 0 -38px; padding: 0 38px; background: rgba(208, 116, 60, 0.32); }
+.body .hl .gi, .body .hl .gd { display: inline-block; width: calc(100% + 76px); margin: 0 -38px; padding: 0 38px; }
+.body .hl .gi { color: #9fdcae; background: rgba(46, 160, 67, 0.22); }
+.body .hl .gd { color: #ffaba3; background: rgba(248, 81, 73, 0.22); }
+.body .hl .gh, .body .hl .gu { color: #8fa6aa; }
+
+/* Mermaid diagrams and charts, drawn in the theme's colours. */
+.body .diagram { display: flex; justify-content: center; margin: 0 0 26px; }
+.body .diagram svg { max-width: 100%; max-height: 600px; height: auto; }
+
+/* A step lies over an invisible copy of the finished slide, so nothing moves as the slide builds. */
+.steps { display: grid; }
+.steps > * { grid-area: 1 / 1; align-self: start; }
+.steps > .ghost { visibility: hidden; align-self: stretch; }
 .body blockquote { margin: 0 0 26px; padding: 22px 34px; border-left: 12px solid #d0743c; background: #f4e3d6; border-radius: 0 20px 20px 0; }
 .body blockquote p { margin: 0; }
 .body img { display: block; max-width: 100%; max-height: 600px; border-radius: 22px; margin: 0 auto 26px; box-shadow: 0 8px 30px rgba(15, 58, 68, 0.12); }

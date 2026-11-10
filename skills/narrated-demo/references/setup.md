@@ -54,7 +54,12 @@ A virtual environment outside the skill is equally valid; it need not be committ
 the slide frames; it looks in the usual places, or set `CHROME=/path/to/chrome`. The first build
 downloads `hexgrad/Kokoro-82M` (about 330 MB, Apache-2.0) into `~/.cache/huggingface`. Kokoro voices
 about 20 times faster than real time on an M2 Max, so a two-minute deck builds in under half a
-minute and a re-run after an edit in a few seconds. Check the setup with the bundled example:
+minute and a re-run after an edit in a few seconds.
+
+The first deck with a ` ```mermaid ` block downloads Mermaid (pinned version, about 3.5 MB, MIT) from jsDelivr into
+`~/.cache/narrated-demo/` (or `$XDG_CACHE_HOME/narrated-demo/`) and checks it against a pinned SHA-256; Chrome then
+draws diagrams from that file, with no network. For a machine without network access, copy `mermaid-<version>.min.js`
+into that folder from one that has it. Code highlighting uses Pygments, installed by `requirements.txt`. Check the setup with the bundled example:
 
 ```bash
 mkdir -p /tmp/deck-check && cp "$SKILL_DIR/examples/deck.md" /tmp/deck-check/

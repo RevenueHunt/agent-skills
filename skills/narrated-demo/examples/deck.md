@@ -13,12 +13,40 @@ Turn a document into a short spoken explainer.
 ## One file, one command
 
 1. Write `talk.md`: a heading per slide
+
+> You write one Markdown file, and every heading starts a slide.
+
 2. Add the spoken lines under each slide
+
+> The quoted lines are spoken, and each one shows the slide as written above it.
+
 3. Run `deck.py talk.md`
 
-> You write one Markdown file.
-> Every heading starts a slide, and the quoted lines under it are spoken.
 > Then one command draws the slides and records the voice.
+
+## How a build runs
+
+```mermaid
+flowchart LR
+  md[talk.md] --> slides[Slides in Chrome]
+  md --> voice[Voice per line]
+  slides --> deck[deck.json]:::accent
+  voice --> deck
+  deck --> mp4[MP4]
+```
+
+> Chrome draws the slides, diagrams included, while each line is voiced.
+> Both come together in one deck, and an MP4 when you ask for it.
+
+## Code reads as code
+
+```diff
+  def total(items):
+-     return sum(items)
++     return sum(item.price for item in items)
+```
+
+> Code blocks are highlighted, and diffs show what was added and removed.
 
 ## What you get
 
