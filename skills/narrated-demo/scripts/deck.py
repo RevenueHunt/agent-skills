@@ -639,7 +639,8 @@ def warm_socket() -> Path:
 
 def warm() -> int:
     """--warm: start the next build's Kokoro processes now, so they load while the deck is written. The first build to
-    ask takes them over through a socket; without one they stop after WARM_IDLE seconds. It never stays running."""
+    ask takes them over through a socket; without one they stop after WARM_IDLE seconds. A second --warm finds this one
+    waiting and restarts that wait, since a build is coming. It never stays running."""
     path = warm_socket()
     with socket.socket(socket.AF_UNIX) as probe:
         try:
