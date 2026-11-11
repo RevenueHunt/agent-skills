@@ -10,6 +10,9 @@ title slide; a `##` heading is a content slide whose body is ordinary Markdown, 
 above it: narration between body lines reveals the slide step by step. Captions are text, never pixels: the player
 draws them over the slide and the MP4 carries them as a subtitle track. Spoken audio, diagrams and rendered frames are
 cached by content, so editing one line re-voices that line and redraws nothing.
+
+While it builds, deck.json says `"building": true` and grows line by line with a partial narration track, so a player
+plays the start within seconds; a build that fails leaves what it published with an `error`.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -452,11 +456,15 @@ mermaid.initialize({config});
     return {source: path.read_text() for source, path in paths.items()}
 
 
-def render_frames(scenes: list[dict], base: Path, cache: Path, parallel: int) -> tuple[list[Path], int]:
-    """One JPEG per spoken line (equal steps share one), cached by its HTML and images; `parallel` Chromes at a time."""
+def render_frames(
+    scenes: list[dict], base: Path, cache: Path, pool: ThreadPoolExecutor, tmp: Path
+) -> tuple[list[Path], dict[Path, Future]]:
+    """One JPEG per spoken line (equal steps share one), cached by its HTML and images. The missing ones are drawn on
+    `pool` in the order they are spoken; the second result holds each one's job."""
     css = code_css() + THEME.read_text()  # the theme's own code rules come last and win
     diagrams = draw_diagrams(scenes, cache)
-    jobs, frames = [], []
+    drawing: dict[Path, Future] = {}
+    frames = []
     for scene, shown in ((scene, shown) for scene in scenes for shown in scene["steps"]):
         page = frame_html(scene, base, css, shown, diagrams)
         assets = "".join(
@@ -467,51 +475,50 @@ def render_frames(scenes: list[dict], base: Path, cache: Path, parallel: int) ->
         digest = hashlib.sha256((page + assets).encode()).hexdigest()[:20]
         out = cache / "frames" / f"{digest}.jpg"
         frames.append(out)
-        if not out.exists() and all(out != job[1] for job in jobs):
-            jobs.append((page, out))
-    if jobs:
-        (cache / "frames").mkdir(parents=True, exist_ok=True)
-        browser = chrome()
-        with tempfile.TemporaryDirectory() as tmp, ThreadPoolExecutor(parallel) as pool:
-            pages = []
-            for index, (page, out) in enumerate(jobs):
-                path = Path(tmp) / f"{index}.html"
-                path.write_text(page)
-                pages.append((path, out))
-            list(pool.map(lambda job: screenshot(browser, *job), pages))
-    return frames, len(jobs)
+        if not out.exists() and out not in drawing:
+            if not drawing:
+                (cache / "frames").mkdir(parents=True, exist_ok=True)
+                browser = chrome()
+            path = tmp / f"{len(drawing)}.html"
+            path.write_text(page)
+            drawing[out] = pool.submit(screenshot, browser, path, out)
+    return frames, drawing
 
 
 # ---------- voice ----------
 
 
-def unvoiced(scenes: list[dict], meta: dict, cache: Path) -> tuple[list[Path], list[tuple[str, Path]]]:
-    """Each spoken line's WAV, cached by what is said, voice and speed, and the lines not voiced yet with theirs."""
+def unvoiced(scenes: list[dict], meta: dict, cache: Path) -> tuple[list[Path], dict[Path, str]]:
+    """Each spoken line's WAV, cached by what is said, voice and speed, and the lines not voiced yet by their WAV."""
     lines = [line for scene in scenes for line in scene["spoken"]]
     paths = [
         cache / "audio" / (hashlib.sha256(json.dumps([line, meta["voice"], meta["speed"]]).encode()).hexdigest()[:20] + ".wav")
         for line in lines
     ]
-    return paths, [(line, path) for line, path in zip(lines, paths) if not path.exists()]
+    return paths, {path: line for line, path in zip(lines, paths) if not path.exists()}
 
 
-def voice(missing: list[tuple[str, Path]], meta: dict) -> None:
-    """Speak each line into its WAV with Kokoro."""
-    if not missing:
-        return
-    import numpy as np
-    import soundfile as sf
-    from kokoro import KPipeline
+def voice(missing: dict[Path, str], meta: dict, said: dict[Path, Future]) -> None:
+    """Speak each line into its WAV with Kokoro, in order, and resolve its future; an error fails every line left."""
+    try:
+        import numpy as np
+        import soundfile as sf
+        from kokoro import KPipeline
 
-    missing[0][1].parent.mkdir(parents=True, exist_ok=True)
-    pipeline = KPipeline(lang_code=meta["voice"][0], repo_id="hexgrad/Kokoro-82M")
-    if meta["voice"][0] in "ab":
-        say_check(pipeline.g2p, [line for line, _ in missing])
-    for line, path in missing:
-        chunks = [np.asarray(a, dtype=np.float32) for _, _, a in pipeline(line, voice=meta["voice"], speed=meta["speed"])]
-        if not chunks:
-            raise DeckError(f"Kokoro produced no audio for: {line}")
-        sf.write(path, np.concatenate(chunks), SR)
+        next(iter(missing)).parent.mkdir(parents=True, exist_ok=True)
+        pipeline = KPipeline(lang_code=meta["voice"][0], repo_id="hexgrad/Kokoro-82M")
+        if meta["voice"][0] in "ab":
+            say_check(pipeline.g2p, list(missing.values()))
+        for path, line in missing.items():
+            chunks = [np.asarray(a, dtype=np.float32) for _, _, a in pipeline(line, voice=meta["voice"], speed=meta["speed"])]
+            if not chunks:
+                raise DeckError(f"Kokoro produced no audio for: {line}")
+            sf.write(path, np.concatenate(chunks), SR)
+            said[path].set_result(path)
+    except BaseException as error:
+        for future in said.values():
+            if not future.done():
+                future.set_exception(error)
 
 
 def say_check(g2p, lines: list[str]) -> None:
@@ -535,18 +542,11 @@ def say_check(g2p, lines: list[str]) -> None:
 # ---------- assembly ----------
 
 
-def background(work, *args) -> Future:
-    """work(*args) on a daemon thread, so a build that stops early (a diagram error) exits without waiting for it."""
-    future: Future = Future()
-
-    def run() -> None:
-        try:
-            future.set_result(work(*args))
-        except BaseException as error:
-            future.set_exception(error)
-
-    threading.Thread(target=run, daemon=True).start()
-    return future
+def publish(out: Path, manifest: dict) -> None:
+    """Write deck.json in one step, so a player reading it while the deck builds never sees half of it."""
+    partial = out / "deck.json.part"
+    partial.write_text(json.dumps(manifest, indent=1, ensure_ascii=False))
+    partial.replace(out / "deck.json")
 
 
 def timestamp(seconds: float) -> str:
@@ -555,60 +555,34 @@ def timestamp(seconds: float) -> str:
 
 
 def build(source: Path, video: bool) -> Path:
-    import numpy as np
-    import soundfile as sf
-
     meta, scenes = parse(source.read_text())
     out = source.with_suffix(".deck")
-    cache = out / ".cache"
-    # Kokoro loads (about 5 s) and speaks while Chrome draws the slides. Chrome slows the load down: two at a time keep
-    # ahead of the voice and cost it least (#23605), six draw fastest when there is nothing to voice.
-    audio, missing = unvoiced(scenes, meta, cache)
-    voicing = background(voice, missing, meta)
-    frames, drawn = render_frames(scenes, source.parent.resolve(), cache, 2 if missing else 6)
-    voicing.result()
-    voiced = len(missing)
-
-    cues, pieces, srt = [], [np.zeros(int(LEAD * SR), np.float32)], []
-    t, index = LEAD, 0
-    for number, scene in enumerate(scenes):
-        for position, line in enumerate(scene["lines"]):
-            speech = sf.read(audio[index], dtype="float32")[0]
-            last_in_scene = position == len(scene["lines"]) - 1
-            gap = TAIL if last_in_scene and number == len(scenes) - 1 else GAP_SCENE if last_in_scene else GAP_LINE
-            length = len(speech) / SR
-            start = 0.0 if index == 0 else t  # the first frame shows during the lead-in too
-            cues.append({"scene": number, "text": line, "image": f"frames/{frames[index].name}", "start": round(start, 3)})
-            srt.append(f"{index + 1}\n{timestamp(t)} --> {timestamp(t + length)}\n{textwrap.fill(line, 45)}\n")
-            pieces += [speech, np.zeros(int(gap * SR), np.float32)]
-            t += length + gap
-            index += 1
-    duration = round(t, 3)
-
-    (out / "frames").mkdir(parents=True, exist_ok=True)
-    for old in (out / "frames").iterdir():
-        old.unlink()
-    for frame in set(frames):
-        shutil.copyfile(frame, out / "frames" / frame.name)
-    with tempfile.TemporaryDirectory() as tmp:
-        wav = Path(tmp) / "narration.wav"
-        sf.write(wav, np.concatenate(pieces), SR)
-        subprocess.run(
-            ["ffmpeg", "-loglevel", "error", "-y", "-i", str(wav), "-c:a", "aac", "-b:a", "96k", str(out / "narration.m4a")],
-            check=True,
-        )
-    srt_path = out / f"{source.stem}.srt"
-    srt_path.write_text("\n".join(srt))
     manifest = {
         "title": scenes[0]["title"],
         "width": WIDTH,
         "height": HEIGHT,
-        "duration": duration,
-        "audio": "narration.m4a",
+        "duration": 0,
+        "audio": "",
         "captions": True,  # the player draws each cue's text; the frames carry none
-        "cues": cues,
+        "cues": [],
     }
-    (out / "deck.json").write_text(json.dumps(manifest, indent=1, ensure_ascii=False))
+    # The deck plays while it builds: deck.json says `building` and grows as lines are voiced and drawn, in order.
+    (out / "frames").mkdir(parents=True, exist_ok=True)
+    for old in (out / "frames").iterdir():
+        old.unlink()
+    shutil.rmtree(out / ".cache" / "live", ignore_errors=True)
+    publish(out, {**manifest, "building": True})
+    try:
+        srt, voiced, drawn = assemble(out, source.parent.resolve(), meta, scenes, manifest)
+    except BaseException as error:
+        # A viewer keeps what was built so far and sees why the rest is missing.
+        stopped = isinstance(error, (KeyboardInterrupt, SystemExit))
+        reason = "stopped" if stopped else str(error).splitlines()[0] if str(error) else type(error).__name__
+        publish(out, {**manifest, "error": reason})
+        raise
+    cues, duration = manifest["cues"], manifest["duration"]
+    srt_path = out / f"{source.stem}.srt"
+    srt_path.write_text("\n".join(srt))
     contact_sheet(out, cues)
 
     print(f"{len(scenes)} scenes, {len(cues)} lines, {duration:.1f} s; voiced {voiced} new, drew {drawn} new")
@@ -619,6 +593,68 @@ def build(source: Path, video: bool) -> Path:
         make_video(out, cues, duration, srt_path, mp4)
         print(f"video:   {mp4}")
     return out / "deck.json"
+
+
+def assemble(out: Path, base: Path, meta: dict, scenes: list[dict], manifest: dict) -> tuple[list[str], int, int]:
+    """Voice and draw the deck in `out`, publishing it into `manifest` as it grows, until it is finished. Returns the
+    subtitles and how many lines were voiced and frames drawn."""
+    import numpy as np
+    import soundfile as sf
+
+    cache = out / ".cache"
+    # Kokoro loads (about 5 s) and speaks while Chrome draws the slides. Chrome slows the load down: two at a time keep
+    # ahead of the voice and cost it least (#23605), six draw fastest when there is nothing to voice.
+    audio, missing = unvoiced(scenes, meta, cache)
+    said = {path: Future() for path in missing}
+    if missing:
+        # A daemon, so a build that stops early (a diagram error) exits without waiting for the voice.
+        threading.Thread(target=voice, args=(missing, meta, said), daemon=True).start()
+    cues, pieces, srt = [], [np.zeros(int(LEAD * SR), np.float32)], []
+    t, index, published = LEAD, 0, 0.0
+    pool = ThreadPoolExecutor(2 if missing else 6)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            frames, drawing = render_frames(scenes, base, cache, pool, Path(tmp))
+            spoken = [(number, scene, position) for number, scene in enumerate(scenes) for position in range(len(scene["lines"]))]
+            for number, scene, position in spoken:
+                for job in (said.get(audio[index]), drawing.get(frames[index])):
+                    if job:
+                        job.result()
+                speech = sf.read(audio[index], dtype="float32")[0]
+                line = scene["lines"][position]
+                last_in_scene = position == len(scene["lines"]) - 1
+                gap = TAIL if last_in_scene and number == len(scenes) - 1 else GAP_SCENE if last_in_scene else GAP_LINE
+                length = len(speech) / SR
+                start = 0.0 if index == 0 else t  # the first frame shows during the lead-in too
+                cues.append({"scene": number, "text": line, "image": f"frames/{frames[index].name}", "start": round(start, 3)})
+                srt.append(f"{index + 1}\n{timestamp(t)} --> {timestamp(t + length)}\n{textwrap.fill(line, 45)}\n")
+                pieces += [speech, np.zeros(int(gap * SR), np.float32)]
+                t += length + gap
+                if not (out / cues[-1]["image"]).exists():
+                    shutil.copyfile(frames[index], out / cues[-1]["image"])
+                index += 1
+                # The first line goes out at once, then the deck each time it has doubled: lines are voiced several
+                # times faster than they are spoken, so a player reaches the end of one part long after the next is out.
+                if t >= 2 * published and index < len(spoken):
+                    published = t
+                    (cache / "live").mkdir(parents=True, exist_ok=True)
+                    sf.write(cache / "live" / f"{index}.wav", np.concatenate(pieces), SR)
+                    manifest.update(duration=round(t, 3), audio=f".cache/live/{index}.wav", cues=list(cues))
+                    publish(out, {**manifest, "building": True})
+    finally:
+        # A failed line stops the build now, not after every slide still queued.
+        pool.shutdown(cancel_futures=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        wav = Path(tmp) / "narration.wav"
+        sf.write(wav, np.concatenate(pieces), SR)
+        subprocess.run(
+            ["ffmpeg", "-loglevel", "error", "-y", "-i", str(wav), "-c:a", "aac", "-b:a", "96k", str(out / "narration.m4a")],
+            check=True,
+        )
+    manifest.update(duration=round(t, 3), audio="narration.m4a", cues=cues)
+    publish(out, manifest)
+    shutil.rmtree(cache / "live", ignore_errors=True)
+    return srt, len(missing), len(drawing)
 
 
 def contact_sheet(out: Path, cues: list[dict]) -> None:
@@ -666,6 +702,8 @@ def main() -> int:
     parser.add_argument("source", type=Path, help="the deck's Markdown file")
     parser.add_argument("--video", action="store_true", help="also write an MP4")
     args = parser.parse_args()
+    # A build stopped with kill, like one stopped with Ctrl-C, tells a player still showing it that it stopped.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     try:
         build(args.source.resolve(), args.video)
     except DeckError as error:

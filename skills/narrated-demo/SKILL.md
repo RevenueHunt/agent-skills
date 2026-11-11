@@ -177,6 +177,19 @@ never edit the generated files. `<name>.deck/` is build output: do not commit or
 - **In Ultimate:** link the deck's `deck.json` by its absolute path, `[My deck](/abs/path/<name>.deck/deck.json)`.
   The transcript shows it as a slide player with audio, captions (CC to hide them), slide skipping and YouTube's
   keys (Space, ←/→, F, C). It never uses an MP4, so build without `--video`.
+
+  The player plays a deck while it builds, so the user can listen within seconds. Start the build in the background
+  instead of waiting for it, then link the deck straight away, in a message before your next command:
+
+  ```bash
+  python /absolute/path/to/narrated-demo/scripts/deck.py /abs/path/<name>.md > /tmp/<name>-deck.log 2>&1 &
+  echo "pid $!"; sleep 1; cat /tmp/<name>-deck.log
+  ```
+
+  An `error:` in that first second is a problem in the Markdown: fix it and start again before linking. The player
+  says "Building…" until the first line is voiced, then plays while the rest is made. Then wait for the build
+  (`while kill -0 <pid> 2>/dev/null; do sleep 1; done; cat /tmp/<name>-deck.log`) and check `contact.jpg` as above;
+  after a fix, build again the same way and link it again. A build that fails part way shows its error in the player.
 - **A file to send or share, or anywhere without that player:** add `--video` to write `<name>.deck/<name>.mp4`
   (a few seconds more), and report its path. The captions are a subtitle track players can turn on and off, not
   pixels. Only build the MP4 when the user wants a file.

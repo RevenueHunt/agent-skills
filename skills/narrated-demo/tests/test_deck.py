@@ -135,6 +135,75 @@ class DeckTests(unittest.TestCase):
         self.assertIn('<div class="diagram"><svg>drawn</svg></div>', page)
         self.assertNotIn("flowchart", page)
 
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg required")
+    def test_the_deck_plays_while_it_builds(self) -> None:
+        published = self.build_stubbed("".join(f"## Slide {n}\n\n- point {n}\n\n> Line {n} a.\n> Line {n} b.\n\n" for n in range(4)))
+        building, final = published[:-1], published[-1]
+        self.assertEqual(building[0]["cues"], [])
+        # The first line goes out alone, then the deck each time it has doubled, every part with audio of its length.
+        self.assertEqual(len(building[1][0]["cues"]), 1)
+        durations = [deck_json["duration"] for deck_json, _ in building[1:]]
+        self.assertGreater(len(durations), 2)
+        self.assertTrue(all(later >= 2 * earlier for earlier, later in zip(durations, durations[1:])), durations)
+        for deck_json, audio_seconds in building[1:]:
+            self.assertTrue(deck_json["building"])
+            self.assertAlmostEqual(audio_seconds, deck_json["duration"], places=2)
+        # The finished deck has exactly the shape decks had before they were published while building.
+        self.assertEqual(list(final), ["title", "width", "height", "duration", "audio", "captions", "cues"])
+        self.assertEqual(len(final["cues"]), 8)
+        self.assertEqual(final["cues"][: len(building[-1][0]["cues"])], building[-1][0]["cues"])
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg required")
+    def test_a_failed_build_keeps_what_it_published_and_says_why(self) -> None:
+        published = self.build_stubbed("## One\n\n> First.\n> Second.\n> Third.\n", fail_on="Third.")
+        self.assertEqual(published[-1]["error"], "Kokoro produced no audio for: Third.")
+        self.assertNotIn("building", published[-1])
+        self.assertEqual([cue["text"] for cue in published[-1]["cues"]], ["First."])
+        self.assertEqual(published[-1]["audio"], ".cache/live/1.wav")
+
+    def build_stubbed(self, markdown: str, fail_on: str = "") -> list:
+        """Build `markdown` with a stand-in voice (0.5 s per line) and Chrome; every deck.json published, a building
+        one with its audio's length."""
+        import soundfile as sf
+
+        def voice(missing, meta, said):
+            for path, line in missing.items():
+                if line == fail_on:
+                    error = deck.DeckError(f"Kokoro produced no audio for: {line}")
+                    for future in said.values():
+                        if not future.done():
+                            future.set_exception(error)
+                    return
+                path.parent.mkdir(parents=True, exist_ok=True)
+                sf.write(path, [0.0] * (deck.SR // 2), deck.SR)
+                said[path].set_result(path)
+
+        def screenshot(browser, page, out):
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=white:s=64x36", "-frames:v", "1", str(out)],
+                           check=True)
+
+        published = []
+        publish = deck.publish
+
+        def record(out, manifest):
+            publish(out, manifest)
+            audio = out / manifest["audio"]
+            published.append((manifest, sf.info(audio).duration) if manifest.get("building") and manifest["cues"] else manifest)
+
+        originals = deck.voice, deck.screenshot, deck.publish, deck.chrome
+        deck.voice, deck.screenshot, deck.publish, deck.chrome = voice, screenshot, record, lambda: "chrome"
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                source = Path(tmp) / "talk.md"
+                source.write_text(markdown)
+                try:
+                    deck.build(source, video=False)
+                except deck.DeckError:
+                    pass  # the failing build's own error, checked through what it published
+        finally:
+            deck.voice, deck.screenshot, deck.publish, deck.chrome = originals
+        return published
+
     def test_slides_carry_no_spoken_text(self) -> None:
         # Captions are drawn by the player and the MP4's subtitle track, so one frame serves the whole scene.
         _, scenes = deck.parse("## Points\n\n- a\n\n> Spoken first.\n> Spoken second.\n")
