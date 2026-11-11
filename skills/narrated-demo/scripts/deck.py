@@ -351,6 +351,10 @@ def chrome() -> str:
     raise DeckError("no Chrome or Chromium found; set CHROME=/path/to/chrome")
 
 
+# A slide takes Chrome a second or two; one stuck for this long stops the build instead of holding it, or its exit, open.
+CHROME_TIMEOUT = 60
+
+
 def run_chrome(browser: str, args: list[str], **options) -> subprocess.CompletedProcess:
     """Headless Chrome on a fresh profile. Now and then it exits with status 2 and the same run then works (seen on
     macOS in #21532, about one run in ten), so a failed run is retried once before the build stops."""
@@ -360,7 +364,7 @@ def run_chrome(browser: str, args: list[str], **options) -> subprocess.Completed
                 return subprocess.run(
                     [browser, "--headless", "--disable-gpu", "--allow-file-access-from-files", f"--user-data-dir={profile}",
                      f"--window-size={WIDTH},{HEIGHT}", *args],
-                    check=True, capture_output=True, **options,
+                    check=True, capture_output=True, timeout=CHROME_TIMEOUT, **options,
                 )
             except subprocess.CalledProcessError:
                 if attempt == 2:
@@ -636,8 +640,10 @@ def assemble(out: Path, base: Path, meta: dict, scenes: list[dict], manifest: di
             for number, scene, position in spoken:
                 # This line's voice and slide, or the first line or slide that fails, whichever comes first.
                 needed = [job for job in (said.get(audio[index]), drawing.get(frames[index])) if job]
-                while not all(job.done() for job in needed) and not failed.done():
-                    wait([*needed, failed], return_when=FIRST_COMPLETED)
+                pending = [job for job in needed if not job.done()]
+                while pending and not failed.done():
+                    wait([*pending, failed], return_when=FIRST_COMPLETED)
+                    pending = [job for job in pending if not job.done()]
                 if failed.done():
                     failed.result()
                 for job in needed:
