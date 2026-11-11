@@ -25,8 +25,9 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -451,8 +452,8 @@ mermaid.initialize({config});
     return {source: path.read_text() for source, path in paths.items()}
 
 
-def render_frames(scenes: list[dict], base: Path, cache: Path) -> tuple[list[Path], int]:
-    """One JPEG per spoken line (equal steps share one), cached by its HTML and images."""
+def render_frames(scenes: list[dict], base: Path, cache: Path, parallel: int) -> tuple[list[Path], int]:
+    """One JPEG per spoken line (equal steps share one), cached by its HTML and images; `parallel` Chromes at a time."""
     css = code_css() + THEME.read_text()  # the theme's own code rules come last and win
     diagrams = draw_diagrams(scenes, cache)
     jobs, frames = [], []
@@ -471,7 +472,7 @@ def render_frames(scenes: list[dict], base: Path, cache: Path) -> tuple[list[Pat
     if jobs:
         (cache / "frames").mkdir(parents=True, exist_ok=True)
         browser = chrome()
-        with tempfile.TemporaryDirectory() as tmp, ThreadPoolExecutor(6) as pool:
+        with tempfile.TemporaryDirectory() as tmp, ThreadPoolExecutor(parallel) as pool:
             pages = []
             for index, (page, out) in enumerate(jobs):
                 path = Path(tmp) / f"{index}.html"
@@ -484,29 +485,33 @@ def render_frames(scenes: list[dict], base: Path, cache: Path) -> tuple[list[Pat
 # ---------- voice ----------
 
 
-def voice(scenes: list[dict], meta: dict, cache: Path) -> tuple[list[Path], int]:
-    """One WAV per spoken line, cached by what is said, voice and speed."""
+def unvoiced(scenes: list[dict], meta: dict, cache: Path) -> tuple[list[Path], list[tuple[str, Path]]]:
+    """Each spoken line's WAV, cached by what is said, voice and speed, and the lines not voiced yet with theirs."""
     lines = [line for scene in scenes for line in scene["spoken"]]
     paths = [
         cache / "audio" / (hashlib.sha256(json.dumps([line, meta["voice"], meta["speed"]]).encode()).hexdigest()[:20] + ".wav")
         for line in lines
     ]
-    missing = [(line, path) for line, path in zip(lines, paths) if not path.exists()]
-    if missing:
-        import numpy as np
-        import soundfile as sf
-        from kokoro import KPipeline
+    return paths, [(line, path) for line, path in zip(lines, paths) if not path.exists()]
 
-        (cache / "audio").mkdir(parents=True, exist_ok=True)
-        pipeline = KPipeline(lang_code=meta["voice"][0], repo_id="hexgrad/Kokoro-82M")
-        if meta["voice"][0] in "ab":
-            say_check(pipeline.g2p, [line for line, _ in missing])
-        for line, path in missing:
-            chunks = [np.asarray(a, dtype=np.float32) for _, _, a in pipeline(line, voice=meta["voice"], speed=meta["speed"])]
-            if not chunks:
-                raise DeckError(f"Kokoro produced no audio for: {line}")
-            sf.write(path, np.concatenate(chunks), SR)
-    return paths, len(missing)
+
+def voice(missing: list[tuple[str, Path]], meta: dict) -> None:
+    """Speak each line into its WAV with Kokoro."""
+    if not missing:
+        return
+    import numpy as np
+    import soundfile as sf
+    from kokoro import KPipeline
+
+    missing[0][1].parent.mkdir(parents=True, exist_ok=True)
+    pipeline = KPipeline(lang_code=meta["voice"][0], repo_id="hexgrad/Kokoro-82M")
+    if meta["voice"][0] in "ab":
+        say_check(pipeline.g2p, [line for line, _ in missing])
+    for line, path in missing:
+        chunks = [np.asarray(a, dtype=np.float32) for _, _, a in pipeline(line, voice=meta["voice"], speed=meta["speed"])]
+        if not chunks:
+            raise DeckError(f"Kokoro produced no audio for: {line}")
+        sf.write(path, np.concatenate(chunks), SR)
 
 
 def say_check(g2p, lines: list[str]) -> None:
@@ -530,6 +535,20 @@ def say_check(g2p, lines: list[str]) -> None:
 # ---------- assembly ----------
 
 
+def background(work, *args) -> Future:
+    """work(*args) on a daemon thread, so a build that stops early (a diagram error) exits without waiting for it."""
+    future: Future = Future()
+
+    def run() -> None:
+        try:
+            future.set_result(work(*args))
+        except BaseException as error:
+            future.set_exception(error)
+
+    threading.Thread(target=run, daemon=True).start()
+    return future
+
+
 def timestamp(seconds: float) -> str:
     ms = round(seconds * 1000)
     return f"{ms // 3_600_000:02d}:{ms // 60_000 % 60:02d}:{ms // 1000 % 60:02d},{ms % 1000:03d}"
@@ -542,8 +561,13 @@ def build(source: Path, video: bool) -> Path:
     meta, scenes = parse(source.read_text())
     out = source.with_suffix(".deck")
     cache = out / ".cache"
-    frames, drawn = render_frames(scenes, source.parent.resolve(), cache)
-    audio, voiced = voice(scenes, meta, cache)
+    # Kokoro loads (about 5 s) and speaks while Chrome draws the slides. Chrome slows the load down: two at a time keep
+    # ahead of the voice and cost it least (#23605), six draw fastest when there is nothing to voice.
+    audio, missing = unvoiced(scenes, meta, cache)
+    voicing = background(voice, missing, meta)
+    frames, drawn = render_frames(scenes, source.parent.resolve(), cache, 2 if missing else 6)
+    voicing.result()
+    voiced = len(missing)
 
     cues, pieces, srt = [], [np.zeros(int(LEAD * SR), np.float32)], []
     t, index = LEAD, 0

@@ -176,9 +176,10 @@ never edit the generated files. `<name>.deck/` is build output: do not commit or
 
 - **In Ultimate:** link the deck's `deck.json` by its absolute path, `[My deck](/abs/path/<name>.deck/deck.json)`.
   The transcript shows it as a slide player with audio, captions (CC to hide them), slide skipping and YouTube's
-  keys (Space, ←/→, F, C).
-- **Anywhere else, or when the user asks for a video:** add `--video` to write `<name>.deck/<name>.mp4`, and report
-  its path. The captions are a subtitle track players can turn on and off, not pixels.
+  keys (Space, ←/→, F, C). It never uses an MP4, so build without `--video`.
+- **A file to send or share, or anywhere without that player:** add `--video` to write `<name>.deck/<name>.mp4`
+  (a few seconds more), and report its path. The captions are a subtitle track players can turn on and off, not
+  pixels. Only build the MP4 when the user wants a file.
 
 Report the deck path, its duration (printed by the build), and anything you left out of the source document.
 
