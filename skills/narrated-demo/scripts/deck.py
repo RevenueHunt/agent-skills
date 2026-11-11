@@ -23,6 +23,7 @@ import hashlib
 import html
 import json
 import os
+import queue
 import re
 import shutil
 import signal
@@ -512,21 +513,22 @@ def voice(missing: dict[Path, str], meta: dict, said: dict[Path, Future]) -> Non
     """Speak each line into its WAV and resolve its future, on the Kokoro processes a --warm left for this build or on
     new ones. Each takes the next line when it is free, so lines finish out of order; an error fails every line left."""
     spelled: set[str] = set()
-    lines, lock = iter(missing.items()), threading.Lock()
+    lines, lock, failed = iter(missing.items()), threading.Lock(), []
 
     def fail(error: BaseException) -> None:
-        for future in said.values():
-            try:
-                future.set_exception(error)
-            except InvalidStateError:
-                pass  # voiced already, or failed first by another process
+        with lock:  # the first error fails every line left, and the other processes stop
+            if not failed:
+                failed.append(error)
+                for future in said.values():
+                    if not future.done():
+                        future.set_exception(error)
 
     def speak(reader, writer) -> None:
         try:
             with reader, writer:  # closing stdin stops the process
                 while True:
                     with lock:
-                        path, line = next(lines, (None, ""))
+                        path, line = (None, "") if failed else next(lines, (None, ""))
                     if path is None:
                         return
                     request = {"line": line, "voice": meta["voice"], "speed": meta["speed"], "wav": str(path)}
@@ -535,8 +537,10 @@ def voice(missing: dict[Path, str], meta: dict, said: dict[Path, Future]) -> Non
                     answer = json.loads(reader.readline() or "{}")
                     if "spelled" not in answer:
                         raise DeckError(answer.get("error") or "a Kokoro process stopped before it voiced every line")
-                    spelled.update(answer["spelled"])
-                    said[path].set_result(path)
+                    with lock:
+                        spelled.update(answer["spelled"])
+                        if not failed:
+                            said[path].set_result(path)
         except BaseException as error:
             fail(error)
 
@@ -567,7 +571,7 @@ def start_voice(stderr=None) -> subprocess.Popen:
     )
 
 
-def voice_worker() -> int:
+def voice_worker() -> None:
     """One Kokoro process: loads Kokoro and the default voice at once, then reads one line at a time as JSON on stdin,
     writes its WAV and answers with the capitals it spelled letter by letter, until stdin closes."""
     import numpy as np
@@ -578,6 +582,16 @@ def voice_worker() -> int:
     answers = os.fdopen(os.dup(1), "w")
     os.dup2(2, 1)
     pipelines: dict[str, object] = {}
+    requests: queue.Queue = queue.Queue()
+
+    def read() -> None:
+        for raw in sys.stdin:
+            requests.put(raw)
+        # Closed stdin means nobody waits for this process any more (the build is done, failed, or its warm-up ended
+        # unused): stop now, even while Kokoro is still loading or speaking.
+        os._exit(0)
+
+    threading.Thread(target=read, daemon=True).start()
 
     def speak(line: str, voice: str, speed: float):
         lang = voice[0]
@@ -595,16 +609,17 @@ def voice_worker() -> int:
         speak("Ready.", DEFAULTS["voice"], DEFAULTS["speed"])
     except Exception:
         pass  # the first line loads it again and answers with the error
-    for raw in sys.stdin:
-        request = json.loads(raw)
+    while True:
+        request = json.loads(requests.get())
         try:
             pipeline, audio = speak(request["line"], request["voice"], request["speed"])
-            sf.write(request["wav"], audio, SR)
+            # Whole or not at all: a WAV in the cache is never voiced again, and this process may stop at any moment.
+            sf.write(request["wav"] + ".part", audio, SR, format="WAV")
+            os.replace(request["wav"] + ".part", request["wav"])
             answer = {"spelled": spelled_out(pipeline.g2p, request["line"]) if request["voice"][0] in "ab" else []}
         except Exception as error:
             answer = {"error": str(error) or type(error).__name__}
         print(json.dumps(answer), file=answers, flush=True)
-    return 0
 
 
 def spelled_out(g2p, line: str) -> list[str]:
@@ -643,7 +658,12 @@ def warm() -> int:
             while True:
                 conn, _ = listener.accept()
                 with conn:
-                    if conn.recv(1):  # a build; a second --warm only checks that this one is alive
+                    conn.settimeout(2)
+                    try:
+                        asked = conn.recv(1)  # a build asks; a second --warm only checks that this one is alive
+                    except OSError:
+                        asked = b""  # silent: not a build
+                    if asked:
                         fds = [fd for p in voices for fd in (p.stdout.fileno(), p.stdin.fileno())]
                         socket.send_fds(conn, [b"v"], fds)
                         return 0
@@ -659,6 +679,7 @@ def warm() -> int:
 def warm_voices() -> list:
     """The Kokoro processes a --warm started, as (reader, writer) pairs, or none when no warm-up is waiting."""
     with socket.socket(socket.AF_UNIX) as conn:
+        conn.settimeout(5)  # a warm-up answers at once, unless another connection holds it for up to 2 s
         try:
             conn.connect(str(warm_socket()))
             conn.sendall(b"v")

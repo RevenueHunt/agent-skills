@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -240,6 +241,21 @@ class DeckTests(unittest.TestCase):
             self.assertFalse(deck.warm_socket().exists())
             for process in started:
                 self.assertEqual(process.wait(5), 0)  # the build closed them
+
+    def test_a_silent_connection_does_not_keep_the_warm_up_from_the_build(self) -> None:
+        # Review of #25133: the warm-up waited forever on a client that connected and said nothing.
+        with self.fake_voices() as (started, tmp):
+            warming = threading.Thread(target=deck.warm)
+            warming.start()
+            while not deck.warm_socket().exists() and warming.is_alive():
+                warming.join(0.01)
+            with socket.socket(socket.AF_UNIX) as silent:
+                silent.connect(str(deck.warm_socket()))
+                said = self.voice_lines(tmp, ["One.", "Two."])
+            warming.join(5)
+            self.assertFalse(warming.is_alive())
+            self.assertEqual(len(started), deck.VOICES)
+            self.assertTrue(all(future.result().exists() for future in said.values()))
 
     def test_an_unused_warm_up_stops_and_the_build_starts_its_own_voices(self) -> None:
         with self.fake_voices() as (started, tmp):
