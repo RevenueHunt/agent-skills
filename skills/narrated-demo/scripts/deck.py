@@ -3,6 +3,7 @@
 
     python deck.py my-talk.md            # -> my-talk.deck/deck.json, narration.m4a, frames/, contact.jpg, my-talk.srt
     python deck.py my-talk.md --video    # also my-talk.deck/my-talk.mp4, with the lines as a subtitle track
+    python deck.py --warm &              # load the voice now, while the deck is written; the next build uses it
 
 Source format: optional front matter (`voice`, `speed`, `pronounce`), then one scene per `#`/`##` heading. A `#` heading is a
 title slide; a `##` heading is a content slide whose body is ordinary Markdown, with highlighted code blocks,
@@ -25,6 +26,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -39,6 +41,10 @@ THEME = SKILL_DIR / "assets" / "deck.css"
 WIDTH, HEIGHT = 1920, 1080
 SR = 24_000  # Kokoro's output rate
 LEAD, GAP_LINE, GAP_SCENE, TAIL = 0.6, 0.25, 0.7, 1.5
+# Kokoro processes that voice one deck. Two voice it about a third faster than one, also while Chrome draws; a third
+# adds little (#25133, on an M2 Max; Apple's GPU is no faster than its CPU here). Each takes about 1.4 GB.
+VOICES = 2
+WARM_IDLE = 300  # seconds a --warm waits for a build before it stops
 MAX_LINE = 90  # characters in one spoken line: two caption rows of 45
 DEFAULTS = {"voice": "af_heart", "speed": 1.1}
 CODE_STYLE = "github-dark"  # Pygments style for code blocks, on the theme's dark code background
@@ -503,44 +509,163 @@ def unvoiced(scenes: list[dict], meta: dict, cache: Path) -> tuple[list[Path], d
 
 
 def voice(missing: dict[Path, str], meta: dict, said: dict[Path, Future]) -> None:
-    """Speak each line into its WAV with Kokoro, in order, and resolve its future; an error fails every line left."""
-    try:
-        import numpy as np
-        import soundfile as sf
-        from kokoro import KPipeline
+    """Speak each line into its WAV and resolve its future, on the Kokoro processes a --warm left for this build or on
+    new ones. Each takes the next line when it is free, so lines finish out of order; an error fails every line left."""
+    spelled: set[str] = set()
+    lines, lock = iter(missing.items()), threading.Lock()
 
-        next(iter(missing)).parent.mkdir(parents=True, exist_ok=True)
-        pipeline = KPipeline(lang_code=meta["voice"][0], repo_id="hexgrad/Kokoro-82M")
-        if meta["voice"][0] in "ab":
-            say_check(pipeline.g2p, list(missing.values()))
-        for path, line in missing.items():
-            chunks = [np.asarray(a, dtype=np.float32) for _, _, a in pipeline(line, voice=meta["voice"], speed=meta["speed"])]
-            if not chunks:
-                raise DeckError(f"Kokoro produced no audio for: {line}")
-            sf.write(path, np.concatenate(chunks), SR)
-            said[path].set_result(path)
-    except BaseException as error:
+    def fail(error: BaseException) -> None:
         for future in said.values():
-            if not future.done():
+            try:
                 future.set_exception(error)
+            except InvalidStateError:
+                pass  # voiced already, or failed first by another process
 
+    def speak(reader, writer) -> None:
+        try:
+            with reader, writer:  # closing stdin stops the process
+                while True:
+                    with lock:
+                        path, line = next(lines, (None, ""))
+                    if path is None:
+                        return
+                    request = {"line": line, "voice": meta["voice"], "speed": meta["speed"], "wav": str(path)}
+                    writer.write(json.dumps(request).encode() + b"\n")
+                    writer.flush()
+                    answer = json.loads(reader.readline() or "{}")
+                    if "spelled" not in answer:
+                        raise DeckError(answer.get("error") or "a Kokoro process stopped before it voiced every line")
+                    spelled.update(answer["spelled"])
+                    said[path].set_result(path)
+        except BaseException as error:
+            fail(error)
 
-def say_check(g2p, lines: list[str]) -> None:
-    """Name the capitalised words Kokoro will spell letter by letter, so one meant as a word gets a `pronounce:` entry."""
-    golds = g2p.lexicon.golds
-    spelled = {
-        token.text
-        for line in lines
-        for token in g2p(line)[1]
-        if re.fullmatch(r"[A-Z]{2,}s?", token.text)
-        and not {token.text, token.text.lower(), token.text.removesuffix("s")} & golds.keys()
-    }
+    try:
+        next(iter(missing)).parent.mkdir(parents=True, exist_ok=True)
+        voices = warm_voices() or [(p.stdout, p.stdin) for p in (start_voice() for _ in range(min(VOICES, len(missing))))]
+    except BaseException as error:
+        fail(error)
+        return
+    threads = [threading.Thread(target=speak, args=pair, daemon=True) for pair in voices]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
     if spelled:
         print(
             f"say check, spelled letter by letter: {', '.join(sorted(spelled))}\n"
             "  fine for API or URL; for one said as a word, add `pronounce: Word=say it` to the front matter",
             file=sys.stderr,
         )
+
+
+def start_voice(stderr=None) -> subprocess.Popen:
+    """A new Kokoro process, talking JSON lines on its stdin and stdout (see voice_worker)."""
+    return subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()), "--voice-worker"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr,
+    )
+
+
+def voice_worker() -> int:
+    """One Kokoro process: loads Kokoro and the default voice at once, then reads one line at a time as JSON on stdin,
+    writes its WAV and answers with the capitals it spelled letter by letter, until stdin closes."""
+    import numpy as np
+    import soundfile as sf
+
+    signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C stops the build, which closes stdin
+    # Answers go to the real stdout; whatever a library prints goes to stderr instead of into them.
+    answers = os.fdopen(os.dup(1), "w")
+    os.dup2(2, 1)
+    pipelines: dict[str, object] = {}
+
+    def speak(line: str, voice: str, speed: float):
+        lang = voice[0]
+        if lang not in pipelines:
+            from kokoro import KPipeline
+
+            model = next(iter(pipelines.values())).model if pipelines else True  # one model for every language
+            pipelines[lang] = KPipeline(lang_code=lang, repo_id="hexgrad/Kokoro-82M", model=model)
+        chunks = [np.asarray(a, dtype=np.float32) for _, _, a in pipelines[lang](line, voice=voice, speed=speed)]
+        if not chunks:
+            raise DeckError(f"Kokoro produced no audio for: {line}")
+        return pipelines[lang], np.concatenate(chunks)
+
+    try:
+        speak("Ready.", DEFAULTS["voice"], DEFAULTS["speed"])
+    except Exception:
+        pass  # the first line loads it again and answers with the error
+    for raw in sys.stdin:
+        request = json.loads(raw)
+        try:
+            pipeline, audio = speak(request["line"], request["voice"], request["speed"])
+            sf.write(request["wav"], audio, SR)
+            answer = {"spelled": spelled_out(pipeline.g2p, request["line"]) if request["voice"][0] in "ab" else []}
+        except Exception as error:
+            answer = {"error": str(error) or type(error).__name__}
+        print(json.dumps(answer), file=answers, flush=True)
+    return 0
+
+
+def spelled_out(g2p, line: str) -> list[str]:
+    """The capitalised words Kokoro will spell letter by letter, so one meant as a word gets a `pronounce:` entry."""
+    golds = g2p.lexicon.golds
+    return sorted({
+        token.text
+        for token in g2p(line)[1]
+        if re.fullmatch(r"[A-Z]{2,}s?", token.text)
+        and not {token.text, token.text.lower(), token.text.removesuffix("s")} & golds.keys()
+    })
+
+
+def warm_socket() -> Path:
+    return Path(tempfile.gettempdir()) / f"narrated-demo-voice-{os.getuid()}.sock"
+
+
+def warm() -> int:
+    """--warm: start the next build's Kokoro processes now, so they load while the deck is written. The first build to
+    ask takes them over through a socket; without one they stop after WARM_IDLE seconds. It never stays running."""
+    path = warm_socket()
+    with socket.socket(socket.AF_UNIX) as probe:
+        try:
+            probe.connect(str(path))
+            print("the voice is already warming up")
+            return 0
+        except OSError:
+            path.unlink(missing_ok=True)  # left by a warm-up that was killed
+    # The processes stop when their stdin closes: when the build is done with them, or when this one stops first.
+    voices = [start_voice(subprocess.DEVNULL) for _ in range(VOICES)]
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind(str(path))
+        listener.listen()
+        listener.settimeout(WARM_IDLE)
+        try:
+            while True:
+                conn, _ = listener.accept()
+                with conn:
+                    if conn.recv(1):  # a build; a second --warm only checks that this one is alive
+                        fds = [fd for p in voices for fd in (p.stdout.fileno(), p.stdin.fileno())]
+                        socket.send_fds(conn, [b"v"], fds)
+                        return 0
+        except TimeoutError:
+            return 0
+        finally:
+            path.unlink(missing_ok=True)
+            for process in voices:
+                process.stdin.close()
+                process.stdout.close()
+
+
+def warm_voices() -> list:
+    """The Kokoro processes a --warm started, as (reader, writer) pairs, or none when no warm-up is waiting."""
+    with socket.socket(socket.AF_UNIX) as conn:
+        try:
+            conn.connect(str(warm_socket()))
+            conn.sendall(b"v")
+            _, fds, _, _ = socket.recv_fds(conn, 1, 2 * VOICES)
+        except OSError:
+            return []
+    return [(open(fds[i], "rb"), open(fds[i + 1], "wb")) for i in range(0, len(fds) - 1, 2)]
 
 
 # ---------- assembly ----------
@@ -622,8 +747,8 @@ def assemble(out: Path, base: Path, meta: dict, scenes: list[dict], manifest: di
     import soundfile as sf
 
     cache = out / ".cache"
-    # Kokoro loads (about 5 s) and speaks while Chrome draws the slides. Chrome slows the load down: two at a time keep
-    # ahead of the voice and cost it least (#23605), six draw fastest when there is nothing to voice.
+    # Kokoro loads (about 5 s, unless a --warm loaded it already) and speaks while Chrome draws the slides. Chrome slows
+    # it down: two at a time keep ahead of the voice and cost it least (#23605), six draw fastest with nothing to voice.
     audio, missing = unvoiced(scenes, meta, cache)
     said = {path: Future() for path in missing}
     if missing:
@@ -727,9 +852,20 @@ def make_video(out: Path, cues: list[dict], duration: float, srt: Path, mp4: Pat
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build a narrated slide deck from Markdown")
-    parser.add_argument("source", type=Path, help="the deck's Markdown file")
+    parser.add_argument("source", type=Path, nargs="?", help="the deck's Markdown file")
     parser.add_argument("--video", action="store_true", help="also write an MP4")
+    parser.add_argument(
+        "--warm", action="store_true",
+        help=f"load the voice for the next build, which takes it over; stops after {WARM_IDLE // 60} minutes without one",
+    )
+    parser.add_argument("--voice-worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.warm:
+        return warm()
+    if args.voice_worker:
+        return voice_worker()
+    if not args.source:
+        parser.error("the deck's Markdown file is missing")
     # A build stopped with kill, like one stopped with Ctrl-C, tells a player still showing it that it stopped.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     try:

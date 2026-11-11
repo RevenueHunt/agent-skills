@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -222,6 +224,70 @@ class DeckTests(unittest.TestCase):
         finally:
             deck.voice, deck.screenshot, deck.publish, deck.chrome = originals
         return published
+
+    def test_a_warm_up_hands_its_voices_to_the_next_build(self) -> None:
+        with self.fake_voices() as (started, tmp):
+            warming = threading.Thread(target=deck.warm)
+            warming.start()
+            while not deck.warm_socket().exists() and warming.is_alive():
+                warming.join(0.01)
+            self.assertEqual(deck.warm(), 0)  # a second warm-up leaves the first one waiting
+            said = self.voice_lines(tmp, ["One.", "Two.", "Three."])
+            warming.join(5)
+            self.assertFalse(warming.is_alive())
+            self.assertEqual(len(started), deck.VOICES)  # the build started none of its own
+            self.assertTrue(all(future.result().exists() for future in said.values()))
+            self.assertFalse(deck.warm_socket().exists())
+            for process in started:
+                self.assertEqual(process.wait(5), 0)  # the build closed them
+
+    def test_an_unused_warm_up_stops_and_the_build_starts_its_own_voices(self) -> None:
+        with self.fake_voices() as (started, tmp):
+            idle, deck.WARM_IDLE = deck.WARM_IDLE, 0.2
+            try:
+                self.assertEqual(deck.warm(), 0)
+            finally:
+                deck.WARM_IDLE = idle
+            for process in started:
+                self.assertEqual(process.wait(5), 0)
+            said = self.voice_lines(tmp, ["One.", "fail", "Three."])
+            self.assertEqual(len(started), 2 * deck.VOICES)
+            with self.assertRaisesRegex(deck.DeckError, "Kokoro produced no audio for: fail"):
+                said[tmp / "1.wav"].result()
+
+    @staticmethod
+    def voice_lines(tmp: Path, lines: list[str]) -> dict:
+        missing = {tmp / f"{i}.wav": line for i, line in enumerate(lines)}
+        said = {path: deck.Future() for path in missing}
+        deck.voice(missing, dict(deck.DEFAULTS), said)
+        return said
+
+    @contextlib.contextmanager
+    def fake_voices(self):
+        """Voice processes that write a silent WAV per line (and fail the line "fail"), on a socket of their own."""
+        fake = (
+            "import json, sys, soundfile\n"
+            "for raw in sys.stdin:\n"
+            "    r = json.loads(raw)\n"
+            "    if r['line'] == 'fail': print(json.dumps({'error': 'Kokoro produced no audio for: fail'}), flush=True); continue\n"
+            "    soundfile.write(r['wav'], [0.0] * 2400, 24000); print(json.dumps({'spelled': []}), flush=True)\n"
+        )
+        started = []
+
+        def start_voice(stderr=None):
+            started.append(subprocess.Popen([sys.executable, "-c", fake], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr))
+            return started[-1]
+
+        originals = deck.start_voice, deck.warm_socket
+        with tempfile.TemporaryDirectory() as tmp:
+            deck.start_voice, deck.warm_socket = start_voice, lambda: Path(tmp) / "voice.sock"
+            try:
+                yield started, Path(tmp)
+            finally:
+                deck.start_voice, deck.warm_socket = originals
+                for process in started:
+                    process.kill()
+                    process.wait()
 
     def test_slides_carry_no_spoken_text(self) -> None:
         # Captions are drawn by the player and the MP4's subtitle track, so one frame serves the whole scene.

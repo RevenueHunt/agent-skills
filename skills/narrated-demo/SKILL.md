@@ -12,6 +12,15 @@ caption style are fixed: do not restyle or tune them. Spend your effort on what 
 
 ## 1. Write the deck
 
+First, before you read or write anything, start loading the voice in the background, so it is ready when you build:
+
+```bash
+python /absolute/path/to/narrated-demo/scripts/deck.py --warm > /dev/null 2>&1 &
+```
+
+The next build takes it over and starts speaking at once; it stops after that build, or after 5 minutes without one.
+Without it, the build loads the voice itself, about 6 seconds later.
+
 Read the source document, pick the 4–8 points a newcomer needs, and write `<name>.md` next to where the user wants
 the result. Every `#` or `##` heading starts a slide; the `> ` lines under it are spoken, one caption each.
 
@@ -189,7 +198,8 @@ never edit the generated files. `<name>.deck/` is build output: do not commit or
   An `error:` in that first second is a problem in the Markdown: fix it and start again before linking. The player
   says "Building…" until the first line is voiced, then plays while the rest is made. Then wait for the build
   (`while kill -0 <pid> 2>/dev/null; do sleep 1; done; cat /tmp/<name>-deck.log`) and check `contact.jpg` as above;
-  after a fix, build again the same way and link it again. A build that fails part way shows its error in the player.
+  for a fix that changes spoken lines, start `--warm` again before you edit, then build again the same way and link
+  it again. A build that fails part way shows its error in the player.
 - **A file to send or share, or anywhere without that player:** add `--video` to write `<name>.deck/<name>.mp4`
   (a few seconds more), and report its path. The captions are a subtitle track players can turn on and off, not
   pixels. Only build the MP4 when the user wants a file.
