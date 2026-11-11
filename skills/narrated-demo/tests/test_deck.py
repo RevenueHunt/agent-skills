@@ -4,6 +4,7 @@ import importlib.util
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -158,15 +159,24 @@ class DeckTests(unittest.TestCase):
         published = self.build_stubbed("## One\n\n> First.\n> Second.\n> Third.\n", fail_on="Third.")
         self.assertEqual(published[-1]["error"], "Kokoro produced no audio for: Third.")
         self.assertNotIn("building", published[-1])
-        self.assertEqual([cue["text"] for cue in published[-1]["cues"]], ["First."])
-        self.assertEqual(published[-1]["audio"], ".cache/live/1.wav")
+        # It stops at the first failure, keeping the part it had published, if any.
+        self.assertIn([cue["text"] for cue in published[-1]["cues"]], [[], ["First."]])
 
-    def build_stubbed(self, markdown: str, fail_on: str = "") -> list:
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg required")
+    def test_a_failed_slide_stops_the_build_while_the_voice_still_loads(self) -> None:
+        # Review of #23605: the build waited for each line's voice before looking at its slide.
+        started = time.monotonic()
+        published = self.build_stubbed("## One\n\n> First.\n", voice_loads_for=20, slide_fails=True)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(published[-1]["error"], "Chrome could not draw the slide")
+
+    def build_stubbed(self, markdown: str, fail_on: str = "", voice_loads_for: float = 0, slide_fails: bool = False) -> list:
         """Build `markdown` with a stand-in voice (0.5 s per line) and Chrome; every deck.json published, a building
         one with its audio's length."""
         import soundfile as sf
 
         def voice(missing, meta, said):
+            time.sleep(voice_loads_for)
             for path, line in missing.items():
                 if line == fail_on:
                     error = deck.DeckError(f"Kokoro produced no audio for: {line}")
@@ -179,6 +189,8 @@ class DeckTests(unittest.TestCase):
                 said[path].set_result(path)
 
         def screenshot(browser, page, out):
+            if slide_fails:
+                raise deck.DeckError("Chrome could not draw the slide")
             subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=white:s=64x36", "-frames:v", "1", str(out)],
                            check=True)
 

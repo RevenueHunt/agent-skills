@@ -12,7 +12,7 @@ draws them over the slide and the MP4 carries them as a subtitle track. Spoken a
 cached by content, so editing one line re-voices that line and redraws nothing.
 
 While it builds, deck.json says `"building": true` and grows line by line with a partial narration track, so a player
-plays the start within seconds; a build that fails leaves what it published with an `error`.
+plays the start within seconds; a build that fails before the deck is finished leaves what it published with an `error`.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ import tempfile
 import textwrap
 import threading
 import urllib.request
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, InvalidStateError, ThreadPoolExecutor, wait
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -542,6 +542,22 @@ def say_check(g2p, lines: list[str]) -> None:
 # ---------- assembly ----------
 
 
+def first_failure(jobs: list[Future]) -> Future:
+    """A future that fails as soon as any of `jobs` does."""
+    failed: Future = Future()
+
+    def check(job: Future) -> None:
+        if not job.cancelled() and job.exception() is not None:
+            try:
+                failed.set_exception(job.exception())
+            except InvalidStateError:
+                pass  # another job failed first, and that is the error reported
+
+    for job in jobs:
+        job.add_done_callback(check)
+    return failed
+
+
 def publish(out: Path, manifest: dict) -> None:
     """Write deck.json in one step, so a player reading it while the deck builds never sees half of it."""
     partial = out / "deck.json.part"
@@ -615,11 +631,17 @@ def assemble(out: Path, base: Path, meta: dict, scenes: list[dict], manifest: di
     try:
         with tempfile.TemporaryDirectory() as tmp:
             frames, drawing = render_frames(scenes, base, cache, pool, Path(tmp))
+            failed = first_failure([*said.values(), *drawing.values()])
             spoken = [(number, scene, position) for number, scene in enumerate(scenes) for position in range(len(scene["lines"]))]
             for number, scene, position in spoken:
-                for job in (said.get(audio[index]), drawing.get(frames[index])):
-                    if job:
-                        job.result()
+                # This line's voice and slide, or the first line or slide that fails, whichever comes first.
+                needed = [job for job in (said.get(audio[index]), drawing.get(frames[index])) if job]
+                while not all(job.done() for job in needed) and not failed.done():
+                    wait([*needed, failed], return_when=FIRST_COMPLETED)
+                if failed.done():
+                    failed.result()
+                for job in needed:
+                    job.result()
                 speech = sf.read(audio[index], dtype="float32")[0]
                 line = scene["lines"][position]
                 last_in_scene = position == len(scene["lines"]) - 1
@@ -642,8 +664,8 @@ def assemble(out: Path, base: Path, meta: dict, scenes: list[dict], manifest: di
                     manifest.update(duration=round(t, 3), audio=f".cache/live/{index}.wav", cues=list(cues))
                     publish(out, {**manifest, "building": True})
     finally:
-        # A failed line stops the build now, not after every slide still queued.
-        pool.shutdown(cancel_futures=True)
+        # A failure stops the build now, not after the slides queued or still being drawn.
+        pool.shutdown(wait=False, cancel_futures=True)
     with tempfile.TemporaryDirectory() as tmp:
         wav = Path(tmp) / "narration.wav"
         sf.write(wav, np.concatenate(pieces), SR)
