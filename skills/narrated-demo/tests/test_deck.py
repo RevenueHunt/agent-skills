@@ -46,6 +46,22 @@ class DeckTests(unittest.TestCase):
         self.assertIn("scene 1 (Silent): no narration", message)
         self.assertIn("scene 2 (Wordy): line is", message)
 
+    def test_long_lines_split_at_sentence_ends_then_commas(self) -> None:
+        two = "The fast tests alone fill all of them. Add the end-to-end tests on top, and everything slows down."
+        one = "Each process loads the model once, keeps it warm between lines, and voices the next line as soon as it is free"
+        _, scenes = deck.parse(f"# T\n\n- a\n\n> {two}\n\n- b\n\n> {one}\n")
+        self.assertEqual(
+            scenes[0]["lines"],
+            [
+                "The fast tests alone fill all of them.",
+                "Add the end-to-end tests on top, and everything slows down.",
+                "Each process loads the model once, keeps it warm between lines,",
+                "and voices the next line as soon as it is free",
+            ],
+        )
+        # Each piece reveals the step its line did.
+        self.assertEqual(scenes[0]["steps"], ["- a", "- a", "- a\n- b", "- a\n- b"])
+
     def test_bold_led_lists_become_stat_tiles(self) -> None:
         tiles = deck.body_html("- **30 days** nightly\n- **12 months** monthly")
         self.assertIn('<div class="stats n2">', tiles)

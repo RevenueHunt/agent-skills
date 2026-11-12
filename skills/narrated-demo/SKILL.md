@@ -61,7 +61,8 @@ Rules that keep it watchable:
 - **Slides carry key words; narration carries sentences.** At most 5 bullets or a 4-row table per slide. A list
   whose every item starts with a bold number (`- **30 days** of snapshots`) becomes stat tiles; use them for 2–4
   key figures, never for bold labels.
-- **One idea per spoken line**, at most 90 characters; aim for 2–4 lines per slide and 1–2 minutes in all.
+- **One idea per spoken line**, at most 90 characters; aim for 2–4 lines per slide and 1–2 minutes in all. A longer
+  line is split for you at sentence ends, then at commas, into lines that each fit.
 - **Write narration the way it is said.** Spell out symbols and units the voice would misread ("150 MB" →
   "a hundred and fifty megabytes", "v2" → "version two"); plain numbers are fine.
 - **Fix a word the voice gets wrong without touching the captions.** Kokoro spells unknown capitals letter by

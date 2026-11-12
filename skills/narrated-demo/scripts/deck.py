@@ -118,6 +118,10 @@ PRONOUNCE = {
     "kubectl": "cube control",
 }
 SAY_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")  # [Word](say it) or [Word](/IPA/)
+# Where a spoken line over MAX_LINE splits: after a sentence end that a capital or digit follows (not 2.5 or e.g. the),
+# and failing that after a clause mark.
+SENTENCE_END = re.compile(r"(?<=[.?!])\s+(?=[^a-z\s])")
+CLAUSE_END = re.compile(r"(?<=[:;,])\s+")
 
 
 class DeckError(Exception):
@@ -183,6 +187,35 @@ def spoken(line: str, pronounce: dict[str, str]) -> str:
     return pattern.sub(say, line)
 
 
+def split_line(line: str) -> list[str]:
+    """A '> ' line whose caption is over MAX_LINE, as the fewest whole sentences per piece that fit; a sentence still
+    over it splits at its clauses the same way. A piece with no break that fits stays over, for parse to report."""
+
+    def fits(text: str) -> bool:
+        return len(SAY_LINK.sub(r"\1", text)) <= MAX_LINE
+
+    def pack(text: str, breaks: re.Pattern) -> list[str]:
+        links = [match.span() for match in SAY_LINK.finditer(text)]
+        parts, start = [], 0
+        for match in breaks.finditer(text):
+            if not any(a < match.start() < b for a, b in links):
+                parts.append(text[start : match.start()])
+                start = match.end()
+        parts.append(text[start:])
+        pieces = parts[:1]
+        for part in parts[1:]:
+            if fits(f"{pieces[-1]} {part}"):
+                pieces[-1] += f" {part}"
+            else:
+                pieces.append(part)
+        return pieces
+
+    if fits(line):
+        return [line]
+    sentences = pack(line, SENTENCE_END)
+    return [piece for sentence in sentences for piece in ([sentence] if fits(sentence) else pack(sentence, CLAUSE_END))]
+
+
 def parse(text: str) -> tuple[dict, list[dict]]:
     """Front matter and scenes: [{title, level, body, lines, spoken, steps}]; lines are the captions, spoken what the
     voice says for each, and steps[i] the body shown while lines[i] is spoken."""
@@ -215,9 +248,9 @@ def parse(text: str) -> tuple[dict, list[dict]]:
                 raise DeckError("text before the first # or ## heading; every slide starts with a heading")
         elif not fenced and raw.startswith(">"):
             line = raw[1:].strip()
-            if line:
-                scenes[-1]["lines"].append(SAY_LINK.sub(r"\1", line))
-                scenes[-1]["spoken"].append(spoken(line, pronounce))
+            for piece in split_line(line) if line else []:
+                scenes[-1]["lines"].append(SAY_LINK.sub(r"\1", piece))
+                scenes[-1]["spoken"].append(spoken(piece, pronounce))
                 scenes[-1]["marks"].append(len(scenes[-1]["body"]))
         else:
             if raw.lstrip().startswith("```"):
@@ -248,8 +281,8 @@ def parse(text: str) -> tuple[dict, list[dict]]:
         for line in scene["lines"]:
             if len(line) > MAX_LINE:
                 problems.append(
-                    f"scene {number} ({scene['title']}): line is {len(line)} characters, over {MAX_LINE}; "
-                    f"split it into two '> ' lines: {line[:60]}…"
+                    f"scene {number} ({scene['title']}): line is {len(line)} characters, over {MAX_LINE}, "
+                    f"with no sentence end or comma to split it at; reword it: {line[:60]}…"
                 )
     if problems:
         raise DeckError("\n".join(problems))
